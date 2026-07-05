@@ -101,6 +101,23 @@ void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* fi
   file.close();
 }
 
+bool isCudaRuntimeFunction(Function &Fn) {
+    StringRef Name = Fn.getName();
+    return Name.contains("cuda")         ||
+        Name.contains("__cuda")       ||
+        Name.startswith("cudart")     ||
+        Name.contains("fatbinary")    ||
+        Name.contains("cudaRegister");
+}
+
+bool isCuspisFunction(Function &Fn,
+    const std::map<Value*, StringRef> &FuncAnnotations) {
+  if (Fn == nullptr) 
+    return false;
+  auto It = FuncAnnotations.find(Fn);
+  return It != FuncAnnotations.end() && It->second.startswith("cuspis");
+}
+
 bool shouldCompile(Function &Fn, 
     const std::map<Value*, StringRef> &FuncAnnotations,
     const std::set<Function*> &OriginalFunctions) {
@@ -122,9 +139,11 @@ bool shouldCompile(Function &Fn,
       !FuncAnnotations.find(&Fn)->second.startswith("to_duplicate") */))
       // nor it is one of the original functions
       && OriginalFunctions.find(&Fn) == OriginalFunctions.end()
+      && !isCudaRuntimeFunction(Fn);
+
       // Exclude CUDA host code
-      && !(!StringRef(M->getTargetTriple()).contains("nvptx") && 
-          (M->getFunction("__cudaRegisterFatBinary") || M->getFunction("cudaLaunchKernel")));
+      //&& !(!StringRef(M->getTargetTriple()).contains("nvptx") && 
+      //    (M->getFunction("__cudaRegisterFatBinary") || M->getFunction("cudaLaunchKernel")));
 }
 
 DebugLoc findNearestDebugLoc(Instruction *I) {
