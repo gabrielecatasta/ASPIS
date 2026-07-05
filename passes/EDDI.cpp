@@ -133,7 +133,7 @@ EDDI::cloneInstr(Instruction &I,
 void EDDI::duplicateOperands(
     Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap,
     std::map<Value *, int> &CuspisReplicaMap,
-    std::map<Value *, int> &AllocationSizeMap,
+    std::map<Value *, int> &CuspisAllocationSizeMap,
     BasicBlock &ErrBB) {
   Instruction *IClone = NULL;
   // see if I has a clone
@@ -152,7 +152,7 @@ void EDDI::duplicateOperands(
     if (isa<Instruction>(V)) {
       Instruction *Operand = cast<Instruction>(V);
       if (!isValueDuplicated(DuplicatedInstructionMap, *Operand))
-        duplicateInstruction(*Operand, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+        duplicateInstruction(*Operand, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
     }
     // It may happen that we have a GEP as inline operand of a instruction. The
     // operands of the GEP are not duplicated leading to errors, so we manually
@@ -198,13 +198,13 @@ void EDDI::duplicateOperands(
             Base = V;
         }
 
-        Value *Size = AllocationSizeMap[Base];
+        Value *Size = CuspisAllocationSizeMap[Base];
 
         if (Size != nullptr) {
           IRBuilder<> B(IClone);
           // Load the actual device pointer from the alloca
-          Value *LoadedPtr = B.CreateLoad(Type::getInt8PtrTy(IClone->getContext(), Base));
-          Value *ReplicaPtr = B.CreateGEP(Type::getInt8Ty(IClone->getContext(), LoadedPtr, Size));
+          Value *LoadedPtr = B.CreateLoad(Type::getInt8PtrTy(IClone->getContext()), Base);
+          Value *ReplicaPtr = B.CreateGEP(Type::getInt8Ty(IClone->getContext()), LoadedPtr, Size);
           IClone->setOperand(J, ReplicaPtr);
         }
       }
@@ -775,7 +775,7 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
 int EDDI::duplicateInstruction(
     Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap,
     std::map<Value *, int> &CuspisReplicaMap,
-    std::map<Value *, int> &AllocationSizeMap,
+    std::map<Value *, int> &CuspisAllocationSizeMap,
     BasicBlock &ErrBB) {
   if (isValueDuplicated(DuplicatedInstructionMap, I)) {
     return 0;
@@ -803,7 +803,7 @@ int EDDI::duplicateInstruction(
     cloneInstr(I, DuplicatedInstructionMap);
 
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
   }
 
   // if the instruction is a store instruction we need to duplicate it and its
@@ -812,7 +812,7 @@ int EDDI::duplicateInstruction(
     Instruction *IClone = cloneInstr(I, DuplicatedInstructionMap);
 
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
 
     // add consistency checks on I
 
@@ -835,7 +835,7 @@ int EDDI::duplicateInstruction(
   // checks
   else if (isa<BranchInst, SwitchInst, ReturnInst, IndirectBrInst>(I)) {
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_BRANCH
@@ -886,7 +886,7 @@ int EDDI::duplicateInstruction(
       cloneInstr(*CInstr, DuplicatedInstructionMap);
 
       // duplicate the operands
-      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
@@ -899,7 +899,7 @@ int EDDI::duplicateInstruction(
 
     else {
       // duplicate the operands
-      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, ErrBB);
+      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
@@ -1045,7 +1045,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   //       processes a load/store/GEP using x_dup, it checks its metadata
   std::map<Value *, int> CuspisReplicaMap;
 
-  std::map<Value *, int> AllocationSizeMap;
+  std::map<Value *, Value *> CuspisAllocationSizeMap;
 
   std::map<Value *, Value *>
       DuplicatedInstructionMap; // is a map containing the instructions
@@ -1139,7 +1139,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
               auto *I = cast<Instruction>(U);
               if (!isValueDuplicated(DuplicatedInstructionMap, *I)) {
                 int shouldDelete =
-                  duplicateInstruction(*I, DuplicatedInstructionMap, CuspisReplicaMap, AllocationSizeMap, *ErrBB);
+                  duplicateInstruction(*I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, *ErrBB);
                 // the instruction duplicated may be equal to the original, so we
                 // return shouldDelete in order to drop the duplicates
                 if (shouldDelete) {
