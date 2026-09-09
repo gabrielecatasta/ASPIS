@@ -14,6 +14,7 @@
 #include <iostream>
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Demangle/Demangle.h"
 
 using namespace llvm;
 using LinkageMap = std::unordered_map<std::string, std::vector<StringRef>>;
@@ -103,24 +104,43 @@ void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* fi
 
 bool isCudaRuntimeFunction(Function &Fn) {
     StringRef Name = Fn.getName();
-    return Name.contains("cuda")         ||
+    return Name.contains("cuda")      ||
         Name.contains("__cuda")       ||
         Name.startswith("cudart")     ||
         Name.contains("fatbinary")    ||
         Name.contains("cudaRegister");
 }
 
+bool isSystemFunction(Function &Fn) {
+  StringRef Name = Fn.getName();
+
+  if (!Name.startswith("_Z"))
+    return false;
+
+  std::string Demangled = demangle(Name.str());
+  StringRef D(Demangled);
+
+  return D.contains("std::")        ||
+         D.contains("__gnu_cxx::")  ||
+         D.contains("__cxxabiv1::");
+}
+
 bool isCuspisFunction(Function &Fn,
     const std::map<Value*, StringRef> &FuncAnnotations) {
-  if (Fn == nullptr) 
-    return false;
-  auto It = FuncAnnotations.find(Fn);
+  if (Fn.getName().startswith("_ZN6CUSPIS") ||
+      Fn.getName().startswith("_ZNK6CUSPIS"))
+    return true;
+  auto It = FuncAnnotations.find(&Fn);
   return It != FuncAnnotations.end() && It->second.startswith("cuspis");
 }
 
 bool shouldCompile(Function &Fn, 
     const std::map<Value*, StringRef> &FuncAnnotations,
     const std::set<Function*> &OriginalFunctions) {
+  if (isCuspisFunction(Fn, FuncAnnotations))
+      return false;
+  if (Fn.getName().contains("__device_stub__"))
+      return false;
   assert(&Fn != NULL && "Are you passing a null pointer?");
   Module *M = Fn.getParent();
   return 
@@ -139,7 +159,8 @@ bool shouldCompile(Function &Fn,
       !FuncAnnotations.find(&Fn)->second.startswith("to_duplicate") */))
       // nor it is one of the original functions
       && OriginalFunctions.find(&Fn) == OriginalFunctions.end()
-      && !isCudaRuntimeFunction(Fn);
+      && !isCudaRuntimeFunction(Fn)
+      && !isSystemFunction(Fn);
 
       // Exclude CUDA host code
       //&& !(!StringRef(M->getTargetTriple()).contains("nvptx") && 

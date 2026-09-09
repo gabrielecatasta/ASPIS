@@ -1,1 +1,19 @@
-*compiled_*_functions.csv
+# build artifacts
+build/
+*.ll
+*.ptx
+*.fatbin
+*.o
+*.log
+
+# ASPIS pass output
+compiled_*_functions.csv
+
+# benchmark output
+axpy_out
+conv_out
+*.dat
+out.dat
+axpy_b.txt
+axpy_k.txt
+axpy_t.txt

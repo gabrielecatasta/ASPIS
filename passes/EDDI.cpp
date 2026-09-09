@@ -132,8 +132,6 @@ EDDI::cloneInstr(Instruction &I,
  */
 void EDDI::duplicateOperands(
     Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap,
-    std::map<Value *, int> &CuspisReplicaMap,
-    std::map<Value *, int> &CuspisAllocationSizeMap,
     BasicBlock &ErrBB) {
   Instruction *IClone = NULL;
   // see if I has a clone
@@ -152,7 +150,7 @@ void EDDI::duplicateOperands(
     if (isa<Instruction>(V)) {
       Instruction *Operand = cast<Instruction>(V);
       if (!isValueDuplicated(DuplicatedInstructionMap, *Operand))
-        duplicateInstruction(*Operand, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+        duplicateInstruction(*Operand, DuplicatedInstructionMap, ErrBB);
     }
     // It may happen that we have a GEP as inline operand of a instruction. The
     // operands of the GEP are not duplicated leading to errors, so we manually
@@ -180,48 +178,20 @@ void EDDI::duplicateOperands(
         }
       }
     }
-
+    
     if (IClone != NULL) {
-
-      // TODO: NEW CUSPIS handling
-      auto It = CuspisReplicaMap.find(V);
-      if (It != CuspisReplicaMap.end() && It->second == 1) {
-        // this operand is a replica pointer
-        Value *Base = V;
-
-        auto BaseIt = DuplicatedInstructionMap.find(V);
-        if (BaseIt != DuplicatedInstructionMap.end()) {
-          // it is assumed that V is a pointer to replica 1
-          Base = BaseIt->second;
-          // this means that V is a pointer to replica 0
-          if (CuspisReplicaMap.count(Base) && CuspisReplicaMap[Base] != 0)
-            Base = V;
-        }
-
-        Value *Size = CuspisAllocationSizeMap[Base];
-
-        if (Size != nullptr) {
-          IRBuilder<> B(IClone);
-          // Load the actual device pointer from the alloca
-          Value *LoadedPtr = B.CreateLoad(Type::getInt8PtrTy(IClone->getContext()), Base);
-          Value *ReplicaPtr = B.CreateGEP(Type::getInt8Ty(IClone->getContext()), LoadedPtr, Size);
-          IClone->setOperand(J, ReplicaPtr);
-        }
+      // use the duplicated instruction as operand of IClone
+      auto Duplicate = DuplicatedInstructionMap.find(V);
+      if (Duplicate != DuplicatedInstructionMap.end()) {
+        IClone->setOperand(J, Duplicate->second);
       }
-      else {
-        // use the duplicated instruction as operand of IClone
-        auto Duplicate = DuplicatedInstructionMap.find(V);
-        if (Duplicate != DuplicatedInstructionMap.end()) {
-          IClone->setOperand(J, Duplicate->second); // set the J-th operand with the duplicate value
-        }
 
-        // let us see whether we need to use always the dup for this operand
-        Duplicate = ValuesToAlwaysDup.find(V);
-        if (Duplicate != ValuesToAlwaysDup.end()) { // in this case, we want to use the dup also for the original instruction
-          //errs() << "Overriding operand for instructions: \n" << I << "\n" << *IClone << "\n";
-          I.setOperand(J, Duplicate->second);
-          IClone->setOperand(J, Duplicate->second);
-        }
+      // let us see whether we need to use always the dup for this operand
+      Duplicate = ValuesToAlwaysDup.find(V);
+      if (Duplicate != ValuesToAlwaysDup.end()) { // in this case, we want to use the dup also for the original instruction
+        //errs() << "Overriding operand for instructions: \n" << I << "\n" << *IClone << "\n";
+        I.setOperand(J, Duplicate->second);
+        IClone->setOperand(J, Duplicate->second);
       }
     }
     J++;
@@ -426,13 +396,16 @@ void EDDI::fixFuncValsPassedByReference(
         Value *Original = Duplicate->first;
         Value *Copy = Duplicate->second;
 
-        Type *OriginalType = Original->getType();
-        Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
-        Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
-        DuplicatedInstructionMap.insert(
-            std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
-        DuplicatedInstructionMap.insert(
-            std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+        // do not deference device pointer from host code
+        if (!DeviceReplicaSize.count(Original) && !DeviceReplicaSize.count(Copy)) {
+          Type *OriginalType = Original->getType();
+          Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
+          Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
+          DuplicatedInstructionMap.insert(
+              std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
+          DuplicatedInstructionMap.insert(
+              std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+        }
       }
     }
   }
@@ -774,8 +747,6 @@ int EDDI::transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &Du
  */
 int EDDI::duplicateInstruction(
     Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap,
-    std::map<Value *, int> &CuspisReplicaMap,
-    std::map<Value *, int> &CuspisAllocationSizeMap,
     BasicBlock &ErrBB) {
   if (isValueDuplicated(DuplicatedInstructionMap, I)) {
     return 0;
@@ -803,7 +774,7 @@ int EDDI::duplicateInstruction(
     cloneInstr(I, DuplicatedInstructionMap);
 
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
   }
 
   // if the instruction is a store instruction we need to duplicate it and its
@@ -812,7 +783,7 @@ int EDDI::duplicateInstruction(
     Instruction *IClone = cloneInstr(I, DuplicatedInstructionMap);
 
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
 
     // add consistency checks on I
 
@@ -835,7 +806,7 @@ int EDDI::duplicateInstruction(
   // checks
   else if (isa<BranchInst, SwitchInst, ReturnInst, IndirectBrInst>(I)) {
     // duplicate the operands
-    duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+    duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_BRANCH
@@ -848,45 +819,42 @@ int EDDI::duplicateInstruction(
   // checks
   else if (isa<CallBase>(I)) {
     CallBase *CInstr = cast<CallBase>(&I);
-    // TODO: // Record that x and x_dup correspond to the two replicas.
-        // Do NOT clone the call.
-        // Do NOT call transformCallBaseInst().
-    // there are some instructions that can be annotated with "to_duplicate" in
-    // order to tell the pass to duplicate the function call.
-    Function *Callee = CInstr->getCalledFunction();
-    Callee = getFunctionFromDuplicate(Callee);
+    Function *RealCallee = CInstr->getCalledFunction();
 
-    // check if function is annotated as cuspis and skip EDDI pass
-    if (isCuspisFunction(Callee, FuncAnnotations)) {
-      // check if function is cuspisMalloc and save replica metadata
-      if (Callee->getName().contains("cuspisMalloc")) {
-        Value *Arg = CInstr->getArgOperand(0);
-        Value *Size = CInstr->getArgOperand(1);
-
-        // Recover dup
-        auto It = DuplicatedInstructionMap.find(Arg);
-
-        if (It != DuplicatedInstructionMap.end()) {
-          Value *ArgDup = It->second;
-        
-          CuspisReplicaMap[Arg] = 0;
-          CuspisReplicaMap[ArgDup] = 1;
-
-          // Store size for GEP computation
-          CuspisAllocationSizeMap[Arg] = Size;
+    // CUSPIS APIs: call is never cloned and operands never rewritten, but operand
+    // duplicates are guaranteed to be created for emitShadowPointer and rewriteMemcpyToHost
+    if (RealCallee != NULL && isCuspisFunction(*RealCallee, FuncAnnotations)) {
+      for (Value *V : CInstr->args()) {
+        if (isa<Instruction>(V)) {
+          Instruction *Op = cast<Instruction>(V);
+          if (!isValueDuplicated(DuplicatedInstructionMap, *Op))
+            duplicateInstruction(*Op, DuplicatedInstructionMap, ErrBB);
         }
       }
+
+      // mark as already handled so EDDI does not duplicate it
+      DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(CInstr, CInstr));
+
+      if (RealCallee->getName().contains("cuspisMalloc")) 
+        emitShadowPointer(CInstr, DuplicatedInstructionMap);
+
+      if (RealCallee->getName().contains("cuspisMemcpyToHost") && CInstr->arg_size() == 3) 
+        return rewriteMemcpyToHost(CInstr, DuplicatedInstructionMap);
+
+      return 0;
     }
 
+    Function *Callee = getFunctionFromDuplicate(RealCallee);
+
     // check if the function call has to be duplicated
-    else if ((FuncAnnotations.find(Callee) != FuncAnnotations.end() &&
+    if ((FuncAnnotations.find(Callee) != FuncAnnotations.end() &&
          (*FuncAnnotations.find(Callee)).second.startswith("to_duplicate")) ||
         isIntrinsicToDuplicate(CInstr)) {
       // duplicate the instruction
       cloneInstr(*CInstr, DuplicatedInstructionMap);
 
       // duplicate the operands
-      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+      duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
@@ -899,7 +867,7 @@ int EDDI::duplicateInstruction(
 
     else {
       // duplicate the operands
-      duplicateOperands(I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, ErrBB);
+      duplicateOperands(I, DuplicatedInstructionMap, ErrBB);
 
 // add consistency checks on I
 #ifdef CHECK_AT_CALLS
@@ -929,6 +897,100 @@ int EDDI::duplicateInstruction(
   }
 
   return res;
+}
+
+/**
+ * After a cuspisMalloc call, point the EDDI duplicate of the pointer slot at
+ * replica 1 inside the over-allocation made by CUSPIS.
+ */
+void EDDI::emitShadowPointer(
+  CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
+  Value *Slot = CInstr->getArgOperand(0); // T **devPtr (i.e., address of pointer variable)
+  Value *Size = CInstr->getArgOperand(1); // size of the replica
+
+  auto It = DuplicatedInstructionMap.find(Slot);
+  if (It == DuplicatedInstructionMap.end()) {
+    errs() << "WARNING - cuspisMalloc slot has no duplicate: " << *CInstr << "\n";
+    return;
+  }
+  Value *SlotDup = It->second;
+
+  IRBuilder<> B(CInstr);
+  if (!isa<InvokeInst>(CInstr))
+    // insertion point is right before CInstr
+    B.SetInsertPoint(CInstr->getNextNonDebugInstruction());
+  // invoke has two successors, so go to the normal destination block 
+  // and set insertion point to its first usable position (i.e., after
+  // eventual PHI nodes).
+  else
+    B.SetInsertPoint(&*cast<InvokeInst>(CInstr)->getNormalDest()->getFirstInsertionPt());
+
+  // compute and store the overallocated replica-1 address in the duplicated pointer variable
+  Value *Base = B.CreateLoad(B.getPtrTy(), Slot, "cuspis.base");
+  Value *Shadow = B.CreateGEP(B.getInt8Ty(), Base, Size, "cuspis.replica1");
+  Value *St = B.CreateStore(Shadow, SlotDup);
+
+  // mark as already handled so EDDI does not duplicate them
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Base, Base));
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Shadow, Shadow));
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(St, St));
+
+  DeviceReplicaSize[SlotDup] = Size;
+  DeviceReplicaSize[Shadow] = Size;
+}
+
+/**
+ * Rewrite a 3-argument cuspisMemcpyToHost(dst, src, count) into the 4-argument
+ * overload cuspisMemcpyToHost(dst, dst_dup, src, count) so that replica-1 is
+ * written into the EDDI duplicate of the destination buffer.
+ *
+ * @returns 1 if the original call must be erased, 0 otherwise
+ */
+int EDDI::rewriteMemcpyToHost(
+    CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
+  auto Variant = CuspisDupVariants.find("cuspisMemcpyToHost");
+  if (Variant == CuspisDupVariants.end()) {
+    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToHost; "
+              "destination duplicate will not be synchronised.\n";
+    return 0;
+  }
+  // hold pointer to definition of 4-arg cuspisMemcpyToHost overload in the module
+  Function *DupAwareFn = Variant->second;
+
+  // check if dst argument of cuspisMemcpyToHost has been duplicated beforehand
+  Value *Dst = CInstr->getArgOperand(0);
+  auto Duplicate = DuplicatedInstructionMap.find(Dst);
+  if (Duplicate == DuplicatedInstructionMap.end()) {
+    errs() << "WARNING - cuspisMemcpyToHost 'dst' has no duplicate: " << *CInstr << "\n";
+    return 0;
+  }
+  Value *DstDup = Duplicate->second;
+
+  IRBuilder<> B(CInstr);
+  Value *Args[] = { Dst, DstDup, CInstr->getArgOperand(1), CInstr->getArgOperand(2) };
+
+  // invoke is a terminator, so replacing it with a plain call would leave the block without one
+  Instruction *NewCall;
+  if (isa<InvokeInst>(CInstr)) {
+    InvokeInst *IInst = cast<InvokeInst>(CInstr);
+    NewCall = B.CreateInvoke(DupAwareFn->getFunctionType(), DupAwareFn,
+                             IInst->getNormalDest(), IInst->getUnwindDest(), Args);
+  } else {
+    NewCall = B.CreateCall(DupAwareFn->getFunctionType(), DupAwareFn, Args);
+  }
+
+  // TODO: overhaul
+  if (DebugEnabled)
+    NewCall->setDebugLoc(CInstr->getDebugLoc());
+
+  // TODO: overhaul
+  CInstr->replaceNonMetadataUsesWith(NewCall);
+
+
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(NewCall, NewCall));
+
+  errs() << "EDDI: rewrote cuspisMemcpyToHost with dst_dup\n";
+  return 1;
 }
 
 /**
@@ -1019,6 +1081,17 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   getFuncAnnotations(Md, FuncAnnotations);
   LLVM_DEBUG(dbgs() << "[done]\n");
 
+  // CUSPIS declares which of its functions is the "duplicate-aware" variant of another.
+  // Iterate over every annotation in the module and pick the "duplicate-aware" ones.
+  for (auto &Entry : FuncAnnotations) {
+    if (Entry.second.startswith("cuspis_dup_of:") && (isa<Function>(Entry.first))) {
+      StringRef Base = Entry.second.substr(strlen("cuspis_dup_of:"));
+      // drop the terminator byte since map key is std::string type
+      Base = Base.substr(0, Base.size() - 1);
+      CuspisDupVariants[Base.str()] = cast<Function>(Entry.first);
+    }
+  }
+
   createFtFuncs(Md);
   LinkageMap linkageMap = mapFunctionLinkageNames(Md);
 
@@ -1040,12 +1113,6 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
       }
     }
   }
-
-  // TODO: the idea is to map the values duplicated with CUSPIS so that later, when duplicateOperands()
-  //       processes a load/store/GEP using x_dup, it checks its metadata
-  std::map<Value *, int> CuspisReplicaMap;
-
-  std::map<Value *, Value *> CuspisAllocationSizeMap;
 
   std::map<Value *, Value *>
       DuplicatedInstructionMap; // is a map containing the instructions
@@ -1139,7 +1206,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
               auto *I = cast<Instruction>(U);
               if (!isValueDuplicated(DuplicatedInstructionMap, *I)) {
                 int shouldDelete =
-                  duplicateInstruction(*I, DuplicatedInstructionMap, CuspisReplicaMap, CuspisAllocationSizeMap, *ErrBB);
+                  duplicateInstruction(*I, DuplicatedInstructionMap, *ErrBB);
                 // the instruction duplicated may be equal to the original, so we
                 // return shouldDelete in order to drop the duplicates
                 if (shouldDelete) {

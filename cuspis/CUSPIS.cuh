@@ -42,7 +42,8 @@ namespace CUSPIS {
             }
     };
 
-    std::list<MemAllocation> allocations;
+    // annotate as "exclude" to prevent double bookkeeping with EDDI
+    __attribute__ ((annotate("exclude"))) std::list<MemAllocation> allocations;
 
     template <typename ... Types>
     class Kernel {
@@ -94,7 +95,8 @@ namespace CUSPIS {
             Kernel(int Dg, int Db, int Ns, cudaStream_t S, void (*kernel)(Types ...args), cuspisRedundancyPolicy policy) :
                 Dg(Dg), Db(Db), Ns(Ns), S(S), kernelFunc(kernel), policy(policy) {}
 
-            void launch(Types ...args) {
+            // annotate as "cuspis" to prevent double launch with EDDI
+            void __attribute__ ((annotate("cuspis"))) launch(Types ...args) {
                 if constexpr (NUM_REPLICAS == 1) {
                     kernelFunc<<<Dg, Db, Ns, S>>>(args...);
                     return;
@@ -156,7 +158,7 @@ namespace CUSPIS {
             }
             i++;
         }
-        return cudaFree(devPtr);
+        return cudaFree(*devPtr);
     }
 
     /**
@@ -206,6 +208,39 @@ namespace CUSPIS {
 
         return ret;
 
+    }
+
+    /**
+     * Variant for ASPIS EDDI, filling both the original and duplicated destination buffers.
+     * `dst` receives replica 0, `dst_dup` receives replica 1, and the two are
+     * compared before returning. The pass rewrites 3-arg calls into this form.
+     */
+    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToHost"), 
+            used)) // guarantee the 4-arg function exists in the module with 'used' 
+      cuspisMemcpyToHost(void *dst, void *dst_dup, const void *src, size_t count) {
+        if constexpr (NUM_REPLICAS == 1) {
+            auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
+            if (ret == cudaSuccess && dst_dup != dst)
+                memcpy(dst_dup, dst, count);
+            return ret;
+        }
+
+        auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
+        if (ret != cudaSuccess)
+            return ret;
+
+        ret = cudaMemcpy(dst_dup, (char*)src + count, count, cudaMemcpyDeviceToHost);
+        if (ret != cudaSuccess)
+            return ret;
+
+        if (memcmp(dst, dst_dup, count) != 0) {
+            for (int i = 0; i < count; i++) {
+                if (((char*)dst)[i] != ((char*)dst_dup)[i])
+                    return DataCorruption_Handler(dst, i);
+            }
+        }
+
+        return ret;
     }
 }
 

@@ -15,8 +15,13 @@ int run_axpy(CUSPIS::cuspisRedundancyPolicy policy, float *host_x, int N) {
   float* device_x;
   float* device_y;
   CUSPIS::cuspisMalloc(&device_x, N * sizeof(float));
+
+  // Debugging purposes
+  //printf("device_x address: %p\n", device_x);
+  //printf("device_x_dup expected: %p\n", (char*)device_x + N * sizeof(float));
+
   CUSPIS::cuspisMalloc(&device_y, N * sizeof(float));
-  CUSPIS::cuspisMemcpyToDevice(device_x, host_x, N * sizeof(float));
+  CUSPIS::cuspisMemcpyToDevice(device_x, host_x, N * sizeof(float));  
 
   // Launch the kernel.
   CUSPIS::Kernel<float, float*, float*> k(blocks, N, axpy, policy);
@@ -25,6 +30,15 @@ int run_axpy(CUSPIS::cuspisRedundancyPolicy policy, float *host_x, int N) {
   // Copy output data to host.
   cudaDeviceSynchronize();
   CUSPIS::cuspisMemcpyToHost(host_y, device_y, N * sizeof(float));
+
+  for (int i = 0; i < N; i++) {
+    float expected = a * host_x[i];
+    if (host_y[i] != expected) {
+      fprintf(stderr, "MISMATCH at %d: got %f, expected %f\n",
+              i, host_y[i], expected);
+      break;
+    }
+  }
 
   CUSPIS::cuspisFree(&device_x);
   CUSPIS::cuspisFree(&device_y);
@@ -53,7 +67,7 @@ int main(int argc, char* argv[]) {
     // warm-up
     run_axpy(CUSPIS::cuspisRedundantBlocks, host_d, SIZES);
 
-    for (int i=0; i<SIZES; i++) {
+    for (int i=1; i<SIZES; i++) {
         float time;
         cudaEvent_t start, stop;
 
@@ -79,7 +93,7 @@ int main(int argc, char* argv[]) {
     // warm-up
     run_axpy(CUSPIS::cuspisRedundantThreads, host_d, SIZES);
 
-    for (int i=0; i<SIZES; i++) {
+    for (int i=1; i<SIZES; i++) {
         float time;
         cudaEvent_t start, stop;
 
@@ -105,7 +119,7 @@ int main(int argc, char* argv[]) {
     // warm-up
     run_axpy(CUSPIS::cuspisRedundantKernel, host_d, SIZES);
 
-    for (int i=0; i<SIZES; i++) {
+    for (int i=1; i<SIZES; i++) {
         float time;
         cudaEvent_t start, stop;
 

@@ -37,9 +37,15 @@ class EDDI : public PassInfoMixin<EDDI> {
         // Map of <original, duplicate> for which we need to always use the duplicate in place of the original
         std::map<Value*, Value*> ValuesToAlwaysDup;
 
+        std::map<Value *, Value *> DeviceReplicaSize;
+
+        std::map<std::string, Function *> CuspisDupVariants;
+
+        void emitShadowPointer(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
+        int rewriteMemcpyToHost(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
-        void duplicateOperands (Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, std::map<Value *, int> &CuspisReplicaMap, std::map<Value *, int> &CuspisAllocationSizeMap, BasicBlock &ErrBB);
+        void duplicateOperands (Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
         Value* getPtrFinalValue(Value &V);
         Value* comparePtrs(Value &V1, Value &V2, IRBuilder<> &B);
         void addConsistencyChecks(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
@@ -50,7 +56,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         void duplicateGlobals(Module &Md, std::map<Value *, Value *> &DuplicatedInstructionMap);
         bool isAllocaForExceptionHandling(AllocaInst &I);
         int transformCallBaseInst(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap, IRBuilder<> &B, BasicBlock &ErrBB);
-        int duplicateInstruction(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, std::map<Value *, int> &CuspisReplicaMap, std::map<Value *, int> &CuspisAllocationSizeMap, BasicBlock &ErrBB);
+        int duplicateInstruction(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
         bool isValueDuplicated(std::map<Value *, Value *> &DuplicatedInstructionMap, Instruction &V);
         Function *duplicateFnArgs(Function &Fn, Module &Md, std::map<Value *, Value *> &DuplicatedInstructionMap);
 
