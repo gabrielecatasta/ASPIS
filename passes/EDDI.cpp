@@ -8,6 +8,7 @@
  * ************************************************************************************************
  */
 #include "ASPIS.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -397,7 +398,8 @@ void EDDI::fixFuncValsPassedByReference(
         Value *Copy = Duplicate->second;
 
         // do not deference device pointer from host code
-        if (!DeviceReplicaSize.count(Original) && !DeviceReplicaSize.count(Copy)) {
+        if (!DeviceReplicaSize.count(Original) && !DeviceReplicaSize.count(Copy) &&
+            isa<AllocaInst>(getUnderlyingObject(Original))) {
           Type *OriginalType = Original->getType();
           Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
           Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
