@@ -22,7 +22,7 @@ clang_options=""
 input_files=""
 verbose=false
 cleanup=true
-cuspis_path="/home/gabriele/dev/ASPIS/cuspis/"
+cuspis_path="$DIR/cuspis/"
 
 # Fallback for cuda_bin
 if [[ -z "$cuda_bin" || ! -d "$cuda_bin" ]]; then

@@ -103,17 +103,18 @@ void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* fi
 }
 
 bool isCudaRuntimeFunction(Function &Fn) {
-    StringRef Name = Fn.getName();
-    return Name.contains("cuda")      ||
-        Name.contains("__cuda")       ||
-        Name.startswith("cudart")     ||
-        Name.contains("fatbinary")    ||
-        Name.contains("cudaRegister");
+  StringRef Name = Fn.getName();
+  return Name.contains("cuda")         ||
+         Name.contains("__cuda")       ||
+         Name.startswith("cudart")     ||
+         Name.contains("fatbinary")    ||
+         Name.contains("cudaRegister");
 }
 
 bool isSystemFunction(Function &Fn) {
   StringRef Name = Fn.getName();
 
+  // not a C++ symbol, so cannot be std::
   if (!Name.startswith("_Z"))
     return false;
 
@@ -127,11 +128,9 @@ bool isSystemFunction(Function &Fn) {
 
 bool isCuspisFunction(Function &Fn,
     const std::map<Value*, StringRef> &FuncAnnotations) {
-  if (Fn.getName().startswith("_ZN6CUSPIS") ||
-      Fn.getName().startswith("_ZNK6CUSPIS"))
-    return true;
-  auto It = FuncAnnotations.find(&Fn);
-  return It != FuncAnnotations.end() && It->second.startswith("cuspis");
+  StringRef Name = Fn.getName();
+  return Name.startswith("_ZN6CUSPIS")  ||
+         Name.startswith("_ZNK6CUSPIS");
 }
 
 bool shouldCompile(Function &Fn, 
