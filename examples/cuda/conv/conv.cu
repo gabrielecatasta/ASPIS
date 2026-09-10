@@ -43,7 +43,8 @@ void load_image(char *fname, int dim_x, int dim_y, float *img) {
       cnt++;
     }
 
-    while (fgetc(fp) != '\n') {
+    int c;
+    while ((c = fgetc(fp)) != '\n' && c != EOF) {
       continue;
     }
   }
