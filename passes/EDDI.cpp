@@ -511,6 +511,10 @@ void EDDI::duplicateGlobals(
     bool isPointer = GV->getValueType()->isOpaquePointerTy();
     bool endsWithDup = GV->getName().endswith("_dup");
     bool hasExternalLinkage = GV->isExternallyInitialized() || GV->hasExternalLinkage();
+    // "llvm." is LLVM's reserved namespace, so duplicating a global there produces a
+    // name the backend rejects (unknown special variable).
+    bool isSpecialLLVMGlobal = GV->getName().startswith("llvm.") ||
+                               GV->getSection().startswith("llvm.");
     bool isMetadataInfo = GV->getSection() == "llvm.metadata";
     bool toExclude = !isa<Function>(GV) &&
                      FuncAnnotations.find(GV) != FuncAnnotations.end() &&
@@ -527,7 +531,7 @@ void EDDI::duplicateGlobals(
         } 
       }
     }
-    if (isStructOfFunctions || ! (isFunction || isConstant || endsWithDup || isMetadataInfo || toExclude || hasExternalLinkage || hasExternalLinkage) // is not function, constant, struct and does not end with _dup
+    if (isStructOfFunctions || ! (isFunction || isConstant || endsWithDup || isMetadataInfo || toExclude || hasExternalLinkage || hasExternalLinkage || isSpecialLLVMGlobal) // is not function, constant, struct and does not end with _dup
         /* && ((hasInternalLinkage && (!isArray || (isArray && !cast<ArrayType>(GV.getValueType())->getArrayElementType()->isAggregateType() ))) // has internal linkage and is not an array, or is an array but the element type is not aggregate
             || !isArray) */ // if it does not have internal linkage, it is not an array or a pointer
         ) {
