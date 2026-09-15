@@ -828,8 +828,8 @@ int EDDI::duplicateInstruction(
     CallBase *CInstr = cast<CallBase>(&I);
     Function *RealCallee = CInstr->getCalledFunction();
 
-    // CUSPIS APIs: call is never cloned and operands never rewritten, but operand
-    // duplicates are guaranteed to be created for emitShadowPointer and rewriteMemcpyToHost
+    // The call for CUSPIS APIs are never cloned and operands never rewritten, but operand
+    // duplicates are guaranteed to be created for emitShadowPointer and rewriteMemcpyToHost.
     if (RealCallee != NULL && isCuspisFunction(*RealCallee, FuncAnnotations)) {
       for (Value *V : CInstr->args()) {
         if (isa<Instruction>(V)) {
