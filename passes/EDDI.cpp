@@ -513,8 +513,9 @@ void EDDI::duplicateGlobals(
     bool isPointer = GV->getValueType()->isOpaquePointerTy();
     bool endsWithDup = GV->getName().endswith("_dup");
     bool hasExternalLinkage = GV->isExternallyInitialized() || GV->hasExternalLinkage();
-    // "llvm." is LLVM's reserved namespace, so duplicating a global there produces a
-    // name the backend rejects (unknown special variable).
+    // Globals under "llvm." are backend directives, and a duplicate is a name the
+    // backend cannot lower, so any file with a global constructor falls with
+    // "unknown special variable".
     bool isSpecialLLVMGlobal = GV->getName().startswith("llvm.") ||
                                GV->getSection().startswith("llvm.");
     bool isMetadataInfo = GV->getSection() == "llvm.metadata";
