@@ -111,10 +111,11 @@ bool isCudaRuntimeFunction(Function &Fn) {
          Name.contains("cudaRegister");
 }
 
+// Workaround for STL global destructors, since EDDI duplicates arguments
+// but libc calls them with the original signature.
 bool isSystemFunction(Function &Fn) {
   StringRef Name = Fn.getName();
 
-  // not a C++ symbol, so cannot be std::
   if (!Name.startswith("_Z"))
     return false;
 
