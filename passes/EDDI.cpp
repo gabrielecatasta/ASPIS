@@ -924,9 +924,9 @@ void EDDI::emitShadowPointer(
 
   IRBuilder<> B(CInstr);
   if (!isa<InvokeInst>(CInstr))
-    // insertion point is right before CInstr
+    // insertion point is right after the call
     B.SetInsertPoint(CInstr->getNextNonDebugInstruction());
-  // invoke has two successors, so go to the normal destination block 
+  // invoke has two successors, so go to the normal destination block (call has succeded)
   // and set insertion point to its first usable position (i.e., after
   // eventual PHI nodes).
   else
@@ -986,13 +986,9 @@ int EDDI::rewriteMemcpyToHost(
     NewCall = B.CreateCall(DupAwareFn->getFunctionType(), DupAwareFn, Args);
   }
 
-  // TODO: overhaul
   if (DebugEnabled)
     NewCall->setDebugLoc(CInstr->getDebugLoc());
-
-  // TODO: overhaul
   CInstr->replaceNonMetadataUsesWith(NewCall);
-
 
   DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(NewCall, NewCall));
 
