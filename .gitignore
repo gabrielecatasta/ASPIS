@@ -68,3 +68,20 @@ compiled_eddi_functions.csv
 compiled_cfcss_functions.csv
 
 testing/nvbitfi/logs/*
+
+
+# ASPIS CUDA intermediates
+*.ll
+*.ptx
+*.fatbin
+
+# Benchmark binaries and output
+axpy_out
+conv_out
+conv_ref
+saxpy_out
+t_*
+axpy_b.txt
+axpy_k.txt
+axpy_t.txt
+out.dat
