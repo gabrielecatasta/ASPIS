@@ -1073,6 +1073,56 @@ EDDI::duplicateFnArgs(Function &Fn, Module &Md,
 }
 
 /**
+ * Returns the functions marked as CUDA kernels by !nvvm.annotations
+ */
+std::set<Function *> EDDI::getNvvmKernels(Module &Md) {
+  std::set<Function *> Kernels;
+
+  // get the metadata list in the module scope
+  NamedMDNode *NMDNvvm = Md.getNamedMetadata("nvvm.annotations");
+  if (NMDNvvm == NULL)
+    return Kernels;
+
+  for (MDNode *Node : NMDNvvm->operands()) {
+    if (Node->getNumOperands() < 2)
+      continue;
+
+    Metadata *FnMD = Node->getOperand(0);
+    Metadata *PropertyMD = Node->getOperand(1);
+
+    // extract kernel function pointer and keep track of it
+    if (isa<ValueAsMetadata>(FnMD) && isa<MDString>(PropertyMD)) {
+      if (cast<MDString>(PropertyMD)->getString() == "kernel") {
+        Value *V = cast<ValueAsMetadata>(FnMD)->getValue();
+        if (isa<Function>(V))
+          Kernels.insert(cast<Function>(V));
+      }
+    }
+  }
+
+  return Kernels;
+}
+
+/**
+ * Marks function Fn as CUDA kernel to make it launchable from host code
+ */
+void EDDI::addNvvmKernelAnnotation(Module &Md, Function *Fn) {
+  LLVMContext &Ctx = Md.getContext();
+  NamedMDNode *NMDNvvm = Md.getNamedMetadata("nvvm.annotations");
+
+  if (NMDNvvm != NULL) {
+    Metadata *Operands[] = {  
+        ValueAsMetadata::get(Fn),
+        MDString::get(Ctx, "kernel"),
+        ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(Ctx), 1)) };
+
+    NMDNvvm->addOperand(MDNode::get(Ctx, Operands));
+  }
+}
+
+
+
+/**
  * I have to duplicate all instructions except function calls and branches
  * @param Md
  * @return
@@ -1142,10 +1192,21 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
 
   LLVM_DEBUG(dbgs() << "Found: " << FnList.size() << "\n");
 
+  std::set<Function *> NvvmKernels = getNvvmKernels(Md);
+  std::set<Function *> DuplicateKernels;
+
   // then duplicate the function arguments using FnList populated earlier
   for (Function *Fn : FnList) {
     Function *newFn = duplicateFnArgs(*Fn, Md, DuplicatedInstructionMap);
     DuplicatedFns.insert(newFn);
+
+    // mark kernel's clone as kernel in order to make it launchable from
+    // host code and add it to the set in order to survive cleanup
+    if (NvvmKernels.count(Fn)) {
+      addNvvmKernelAnnotation(Md, newFn);
+      DuplicateKernels.insert(newFn);
+    }
+
     auto FAnns = FuncAnnotations;
     auto OFunc = OriginalFunctions;
     Fn->replaceUsesWithIf(newFn, [FAnns, OFunc] (Use &U) {
@@ -1312,6 +1373,10 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
     FnsToRemove.clear();
     removed = 0;
     for (Function &Fn : Md) {
+      // to make kernel's clone survive cleanup, since it hsa no caller in the IR but
+      // only referenced by nvvm.annotations
+      if(DuplicateKernels.count(&Fn))
+        continue;
       if ((Fn.getName().ends_with("_dup") || Fn.getName().ends_with("_ret") || Fn.getName().ends_with("original") )) {
         bool shouldRemove = true;
         for (auto U : Fn.users()) {

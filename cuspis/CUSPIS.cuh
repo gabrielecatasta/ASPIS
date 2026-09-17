@@ -216,7 +216,7 @@ namespace CUSPIS {
      * compared before returning. The pass rewrites 3-arg calls into this form.
      */
     inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToHost"), 
-            used)) // guarantee the 4-arg function exists in the module with 'used' 
+            used)) // guarantee the 4-arg function exists in the module with 'used', since nothing in the source calls it 
       cuspisMemcpyToHost(void *dst, void *dst_dup, const void *src, size_t count) {
         if constexpr (NUM_REPLICAS == 1) {
             auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
