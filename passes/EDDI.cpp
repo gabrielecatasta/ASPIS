@@ -1120,7 +1120,96 @@ void EDDI::addNvvmKernelAnnotation(Module &Md, Function *Fn) {
   }
 }
 
+/**
+ * Similar functioning of duplicateFnArgs, cloning a device stub into a
+ * double-arity signature version so as to launch the double-arity kernel
+ * emitted by the device-side pass.
+ */
+Function *EDDI::duplicateDeviceStub(Module &Md, Function *Stub) {
+  FunctionType *StubType = Stub->getFunctionType();
+  unsigned NumParams = StubType->getNumParams();
 
+  // build the new parameter list: original params first, duplicates second, matching
+  // the functioning of duplicateFnArgs
+  std::vector<Type *> ParamTypes;
+  for (unsigned i = 0; i < NumParams; i++)
+    ParamTypes.push_back(StubType->getParamType(i));
+  for (unsigned i = 0; i < NumParams; i++)
+    ParamTypes.push_back(StubType->getParamType(i));
+
+  // create the double-arity signature
+  FunctionType *NewType = FunctionType::get(Stub->getReturnType(), ParamTypes, false);
+  // create the empty function in the module
+  Function *NewStub = Function::Create(NewType, Stub->getLinkage(), 
+                                       Stub->getName() + "_dup", &Md);
+
+  // remap the original function's arguments onto the clone's own parameters,
+  ValueToValueMapTy Params;
+  for (unsigned i = 0; i < NumParams; i++)
+    Params[Stub->getArg(i)] = NewStub->getArg(i);
+
+  SmallVector<ReturnInst *, 8> Returns;
+  CloneFunctionInto(NewStub, Stub, Params, 
+                    CloneFunctionChangeType::GlobalChanges, Returns);
+
+  return NewStub;
+}
+
+/**
+  * For each kernel registered by __cudaRegisterFunction, adds a second registration
+  * to bind the duplicated host stub to the device-side symbol emitted by 
+  * the device-side pass into the fatbinary.
+  * Host and device modules are compiled separately, so the host cannot see that
+  * a duplicated kernel exists, hence the need to reconstruct its name from the
+  * content of the original registration.
+  */
+void EDDI::registerDuplicatedKernels(Module &Md) {
+  // get pointer to __cudaRegisterFunction which is used to register compiled kernels
+  // in the fatbinary
+  Function *RegisterFn = Md.getFunction("__cudaRegisterFunction");
+
+  if (RegisterFn != NULL) {
+    // every call to __cudaRegisterFunction is a kernel registration
+    std::vector<CallBase *> Registrations;
+    for (User *U : RegisterFn->users())
+      if (isa<CallBase>(U))
+        Registrations.push_back(cast<CallBase>(U));
+
+    for (CallBase *CInstr : Registrations) {
+      Value *Handle = CInstr->getArgOperand(0); // fatbinary handle
+      Value *Stub = CInstr->getArgOperand(1);   // host stub
+      Value *NameGV = CInstr->getArgOperand(2); // global holding kernel
+
+      if (isa<Function>(Stub) && isa<GlobalVariable>(NameGV)) {
+        // check if global has contents defined in this module and if they are a byte array
+        GlobalVariable *GV = cast<GlobalVariable>(NameGV);
+        if (GV->hasInitializer() && isa<ConstantDataArray>(GV->getInitializer())) {
+          // get global variable byte array content as a string (i.e., the kernel name)
+          StringRef KernelName = cast<ConstantDataArray>(GV->getInitializer())->getAsCString();
+          // generate a duplicated stub
+          Function *NewStub = duplicateDeviceStub(Md, cast<Function>(Stub));
+
+          // TODO: check NewGV additions!
+          Constant *NewStr = ConstantDataArray::getString(Md.getContext(), (KernelName + "_dup").str(), true);
+          GlobalVariable *NewGV = new GlobalVariable(Md, NewStr->getType(), true, GV->getLinkage(), NewStr);
+          NewGV->setUnnamedAddr(GV->getUnnamedAddr());
+          NewGV->setAlignment(GV->getAlign());
+
+          // insert a second registration next to the original, reusing its fatbinary handle and its trailing arguments
+          IRBuilder<> B(CInstr->getNextNonDebugInstruction());
+          Value *Args[] = { Handle, NewStub, NewGV, NewGV,
+                            CInstr->getArgOperand(4), CInstr->getArgOperand(5),
+                            CInstr->getArgOperand(6), CInstr->getArgOperand(7),
+                            CInstr->getArgOperand(8), CInstr->getArgOperand(9) };
+          // create call to __cudaRegisterFunction for the second registration
+          B.CreateCall(RegisterFn->getFunctionType(), RegisterFn, Args);
+
+          errs() << "EDDI: registered duplicated kernel " << KernelName << "_dup\n";
+        }
+      }
+    }
+  }
+}
 
 /**
  * I have to duplicate all instructions except function calls and branches
@@ -1220,6 +1309,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
 
   LLVM_DEBUG(dbgs() << "Duplicating globals... ");
   duplicateGlobals(Md, DuplicatedInstructionMap);
+  registerDuplicatedKernels(Md);
   LLVM_DEBUG(dbgs() << "[done]\n");
 
   // list of duplicated instructions to remove since they are equal to the

@@ -45,6 +45,8 @@ class EDDI : public PassInfoMixin<EDDI> {
         int rewriteMemcpyToHost(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
         std::set<Function *> getNvvmKernels(Module &Md);
         void addNvvmKernelAnnotation(Module &Md, Function *Fn);
+        Function *duplicateDeviceStub(Module &Md, Function *Stub);
+        void registerDuplicatedKernels(Module &Md);
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
         void duplicateOperands (Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap, BasicBlock &ErrBB);
