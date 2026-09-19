@@ -174,6 +174,25 @@ namespace CUSPIS {
     }
 
     /**
+     * Variant for ASPIS EDDI, verifying the source buffer against its duplicate.
+     * `src` and `src_dup` are compared before the copy, so a host-side corruption cannot reach both replicas unnoticed. 
+     * The pass rewrites 3-arg calls into this form.
+     */
+    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToDevice"),
+            used)) // guarantee the 4-arg function exists in the module with 'used' 
+      cuspisMemcpyToDevice(void *dst, const void *src, const void *src_dup, size_t count) {
+        if (src_dup != src && memcmp(src, src_dup, count) != 0) {
+            for (size_t i = 0; i < count; i++) {
+                if (((const char*)src)[i] != ((const char*)src_dup)[i])
+                    return DataCorruption_Handler(dst, i);
+            }
+        }
+
+        return cuspisMemcpyToDevice(dst, src, count);
+    }
+
+
+    /**
      * Wrapper of the cudaMemcpy function, from device to host.
      * 
      * Copies the data from the device to the host.
@@ -212,8 +231,8 @@ namespace CUSPIS {
 
     /**
      * Variant for ASPIS EDDI, filling both the original and duplicated destination buffers.
-     * `dst` receives replica 0, `dst_dup` receives replica 1, and the two are
-     * compared before returning. The pass rewrites 3-arg calls into this form.
+     * `dst` receives replica 0, `dst_dup` receives replica 1, and the two are compared before returning. 
+     * The pass rewrites 3-arg calls into this form.
      */
     inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToHost"), 
             used)) // guarantee the 4-arg function exists in the module with 'used' 

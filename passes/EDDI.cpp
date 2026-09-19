@@ -845,6 +845,9 @@ int EDDI::duplicateInstruction(
       if (RealCallee->getName().contains("cuspisMalloc")) 
         emitShadowPointer(CInstr, DuplicatedInstructionMap);
 
+      if (RealCallee->getName().contains("cuspisMemcpyToDevice") && CInstr->arg_size() == 3) 
+        return rewriteMemcpyToDevice(CInstr, DuplicatedInstructionMap);        
+
       if (RealCallee->getName().contains("cuspisMemcpyToHost") && CInstr->arg_size() == 3) 
         return rewriteMemcpyToHost(CInstr, DuplicatedInstructionMap);
 
@@ -911,7 +914,7 @@ int EDDI::duplicateInstruction(
  * replica 1 inside the over-allocation made by CUSPIS.
  */
 void EDDI::emitShadowPointer(
-  CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
+    CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
   Value *Slot = CInstr->getArgOperand(0); // T **devPtr (i.e., address of pointer variable)
   Value *Size = CInstr->getArgOperand(1); // size of the replica
 
@@ -946,6 +949,56 @@ void EDDI::emitShadowPointer(
   DeviceReplicaSize[Shadow] = Size;
 }
 
+
+/**
+ * Rewrite a 3-argument cuspisMemcpyToDevice(dst, src, count) into the 4-argument
+ * overload cuspisMemcpyToDevice(dst, src, src_dup, count) so that the source
+ * buffer is checked against its EDDI duplicate before being copied to the device.
+ *
+ * @returns 1 if the original call must be erased, 0 otherwise
+ */
+int EDDI::rewriteMemcpyToDevice(
+    CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
+  auto Variant = CuspisDupVariants.find("cuspisMemcpyToDevice");
+  if (Variant == CuspisDupVariants.end()) {
+    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToDevice.\n";
+    return 0;
+  }
+  // hold pointer to definition of 4-arg cuspisMemcpyToDevice overload in the module
+  Function *DupAwareFn = Variant->second;
+
+  // check if the src argument has been duplicated beforehand
+  Value *Src = CInstr->getArgOperand(1);
+  auto Duplicate = DuplicatedInstructionMap.find(Src);
+  if (Duplicate == DuplicatedInstructionMap.end()) {
+    errs() << "WARNING - cuspisMemcpyToDevice 'src' has no duplicate: " << *CInstr << "\n";
+    return 0;
+  }
+  Value *SrcDup = Duplicate->second;
+
+  IRBuilder<> B(CInstr);
+  Value *Args[] = { CInstr->getArgOperand(0), Src, SrcDup, CInstr->getArgOperand(2) };
+
+  // invoke is a terminator, so replacing it with a plain call would leave the block without one
+  Instruction *NewCall;
+  if (isa<InvokeInst>(CInstr)) {
+    InvokeInst *IInst = cast<InvokeInst>(CInstr);
+    NewCall = B.CreateInvoke(DupAwareFn->getFunctionType(), DupAwareFn,
+                             IInst->getNormalDest(), IInst->getUnwindDest(), Args);
+  } else {
+    NewCall = B.CreateCall(DupAwareFn->getFunctionType(), DupAwareFn, Args);
+  }
+
+  if (DebugEnabled)
+    NewCall->setDebugLoc(CInstr->getDebugLoc());
+  CInstr->replaceNonMetadataUsesWith(NewCall);
+
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(NewCall, NewCall));
+
+  errs() << "EDDI: rewrote cuspisMemcpyToDevice with src_dup\n";
+  return 1;
+}
+
 /**
  * Rewrite a 3-argument cuspisMemcpyToHost(dst, src, count) into the 4-argument
  * overload cuspisMemcpyToHost(dst, dst_dup, src, count) so that replica-1 is
@@ -957,8 +1010,7 @@ int EDDI::rewriteMemcpyToHost(
     CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap) {
   auto Variant = CuspisDupVariants.find("cuspisMemcpyToHost");
   if (Variant == CuspisDupVariants.end()) {
-    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToHost; "
-              "destination duplicate will not be synchronised.\n";
+    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToHost.\n";
     return 0;
   }
   // hold pointer to definition of 4-arg cuspisMemcpyToHost overload in the module

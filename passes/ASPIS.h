@@ -42,6 +42,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::map<std::string, Function *> CuspisDupVariants;
 
         void emitShadowPointer(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
+        int rewriteMemcpyToDevice(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
         int rewriteMemcpyToHost(CallBase *CInstr, std::map<Value *, Value *> &DuplicatedInstructionMap);
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
