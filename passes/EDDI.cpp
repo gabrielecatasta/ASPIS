@@ -1146,13 +1146,82 @@ Function *EDDI::duplicateDeviceStub(Module &Md, Function *Stub) {
   // remap the original function's arguments onto the clone's own parameters,
   ValueToValueMapTy Params;
   for (unsigned i = 0; i < NumParams; i++)
-    Params[Stub->getArg(i)] = NewStub->getArg(i);
+    Params[Stub->getArg(i)] = NewStub->getArg(NumParams + i);
 
   SmallVector<ReturnInst *, 8> Returns;
   CloneFunctionInto(NewStub, Stub, Params, 
                     CloneFunctionChangeType::GlobalChanges, Returns);
 
+  widenDeviceStubBody(NewStub, Stub, NumParams);
   return NewStub;
+}
+
+/**
+ * Fixes the body of a cloned device stub so that it launches the duplicated
+ * kernel with all of its arguments.
+ */
+void EDDI::widenDeviceStubBody(Function *NewStub, Function *OldStub, unsigned NumParams) {
+  // find the argument array and the launch in the cloned body
+  AllocaInst *ArgsArray = NULL;
+  CallBase *LaunchCall = NULL;
+
+  for (BasicBlock &BB : *NewStub) {
+    for (Instruction &I : BB) {
+      if (isa<AllocaInst>(I) && I.getName() == "kernel_args")
+        ArgsArray = cast<AllocaInst>(&I);
+      if (isa<CallBase>(I)) {
+        Function *Callee = cast<CallBase>(&I)->getCalledFunction();
+        if (Callee != NULL && Callee->getName() == "cudaLaunchKernel")
+          LaunchCall = cast<CallBase>(&I);
+      }
+    }
+  }
+
+  if (ArgsArray != NULL && LaunchCall != NULL) {
+    // widen kernel_args array from NumParams to 2 * NumParams slots
+    ArgsArray->setOperand(0, ConstantInt::get(Type::getInt64Ty(NewStub->getContext()), 2 * NumParams));
+
+    // give the duplicate parameters storage, at the top of the entry block, since
+    // only the parameters in the original body have a stack slot
+    IRBuilder<> B(ArgsArray);
+    std::vector<Value *> DupSlots;
+    for (unsigned i = 0; i < NumParams; i++) {
+      // create allocation for the parameter (i.e., a new local variable)
+      Value *Slot = B.CreateAlloca(NewStub->getArg(i)->getType());
+      DupSlots.push_back(Slot);
+    }
+
+    // write parameter value into stack slot
+    B.SetInsertPoint(ArgsArray->getNextNonDebugInstruction());
+    for (unsigned i = 0; i < NumParams; i++)
+      B.CreateStore(NewStub->getArg(i), DupSlots[i]);
+
+    // the inherited GEP/store pairs put the originals in slots 0..NumParams-1;
+    // move them to the second half and fill the first half with the duplicates
+    for (User *U : ArgsArray->users()) {
+      if (isa<GetElementPtrInst>(U)) {
+        GetElementPtrInst *GEP = cast<GetElementPtrInst>(U);
+        // operand 0 is the base pointer, operand 1 is the index 
+        if(isa<ConstantInt>(GEP->getOperand(1))) {
+          // read the constant index as a plain integer
+          unsigned Slot = cast<ConstantInt>(GEP->getOperand(1))->getZExtValue();
+          // add NumParams to the index so the original params get moved to the second half
+          // of kernel_args
+          GEP->setOperand(1, ConstantInt::get(Type::getInt32Ty(NewStub->getContext()), Slot + NumParams));
+        }
+      }
+    }
+
+    for (unsigned i = 0; i < NumParams; i++) {
+      // GEP gives the address of a position in kernel_args and store the address of the local variable 
+      // into a position of the array
+      Value *GEP = B.CreateGEP(B.getPtrTy(), ArgsArray, ConstantInt::get(Type::getInt32Ty(NewStub->getContext()), i));
+      B.CreateStore(DupSlots[i], GEP);
+    }
+
+    // make stub launch through the clone's own address
+    LaunchCall->setArgOperand(0, NewStub);
+  }
 }
 
 /**

@@ -46,6 +46,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::set<Function *> getNvvmKernels(Module &Md);
         void addNvvmKernelAnnotation(Module &Md, Function *Fn);
         Function *duplicateDeviceStub(Module &Md, Function *Stub);
+        void widenDeviceStubBody(Function *NewStub, Function *OldStub, unsigned NumParams);
         void registerDuplicatedKernels(Module &Md);
         int isUsedByStore(Instruction &I, Instruction &Use);
         Instruction* cloneInstr(Instruction &I, std::map<Value *, Value *> &DuplicatedInstructionMap);
