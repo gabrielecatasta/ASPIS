@@ -188,7 +188,17 @@ namespace CUSPIS {
             }
         }
 
-        return cuspisMemcpyToDevice(dst, src, count);
+        auto ret = cudaMemcpy(dst, src, count, cudaMemcpyHostToDevice);
+        if (ret != cudaSuccess)
+            return ret;
+
+        if constexpr (NUM_REPLICAS == 2) {
+            ret = cudaMemcpy((char*)dst + count, src_dup, count, cudaMemcpyHostToDevice);
+            if (ret != cudaSuccess)
+                return ret;
+        }
+        
+        return ret;
     }
 
 
