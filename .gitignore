@@ -85,3 +85,7 @@ axpy_b.txt
 axpy_k.txt
 axpy_t.txt
 out.dat
+
+# Test scripts
+run_tests.sh
+clean_tests.sh
