@@ -829,7 +829,7 @@ int EDDI::duplicateInstruction(
     Function *RealCallee = CInstr->getCalledFunction();
 
     // The call for CUSPIS APIs are never cloned and operands never rewritten, but operand
-    // duplicates are guaranteed to be created for emitShadowPointer and rewriteMemcpyToHost.
+    // duplicates are guaranteed to be created for emitShadowPointer and rewriteMemcpyToHost
     if (RealCallee != NULL && isCuspisFunction(*RealCallee, FuncAnnotations)) {
       for (Value *V : CInstr->args()) {
         if (isa<Instruction>(V)) {
@@ -839,7 +839,7 @@ int EDDI::duplicateInstruction(
         }
       }
 
-      // mark as already handled so EDDI does not duplicate it
+      // mark as already handled so EDDI does not duplicate it again
       DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(CInstr, CInstr));
 
       if (RealCallee->getName().contains("cuspisMalloc")) 

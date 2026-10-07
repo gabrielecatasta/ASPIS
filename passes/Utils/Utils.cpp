@@ -112,7 +112,7 @@ bool isCudaRuntimeFunction(Function &Fn) {
 }
 
 // Workaround for STL global destructors, since EDDI duplicates arguments
-// but libc calls them with the original signature.
+// but libc calls them with the original signature
 bool isSystemFunction(Function &Fn) {
   StringRef Name = Fn.getName();
 
@@ -139,6 +139,10 @@ bool shouldCompile(Function &Fn,
     const std::set<Function*> &OriginalFunctions) {
   if (isCuspisFunction(Fn, FuncAnnotations))
       return false;
+  // do not instrument the host-side stub, otherwise cudaLaunchKernel would call its _dup
+  // that was not registered by cudaRegisterFunction
+  // TODO: explore the following to see if it's possible to call the double-arity kernel function
+  //       so that the duplicated parameters get consumed by consistency checks
   if (Fn.getName().contains("__device_stub__"))
       return false;
   assert(&Fn != NULL && "Are you passing a null pointer?");
