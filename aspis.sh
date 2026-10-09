@@ -20,6 +20,10 @@ clang_options=
 eddi_options="-S"
 cfc_options="-S"
 llvm_bin=$(dirname "$(which clang)")
+cuda_bin=$(dirname "$(which nvcc 2> /dev/null)" 2> /dev/null)
+gpu_arch="sm_86" # Default architecture
+cuspis_path="$DIR/cuspis/"
+cuda_mode=false
 suffix=""
 build_dir="."
 dup=0 # 0 = eddi,   1 = seddi,  2 = fdsc
@@ -29,6 +33,15 @@ verbose=false
 cleanup=true
 libstdcpp_added=false
 enable_profiling=false
+
+# Fallback for cuda_bin
+if [[ -z "$cuda_bin" || ! -d "$cuda_bin" ]]; then
+    if [[ -d "/usr/local/cuda/bin" ]]; then
+        cuda_bin="/usr/local/cuda/bin"
+    else
+        cuda_bin=""
+    fi
+fi
 
 # Check if the shell supports colors
 if [ -t 1 ]; then
@@ -174,6 +187,20 @@ EOF
                             llvm_bin=${opt##"--llvm-bin="};
                         fi;
                         ;;
+                    --cuda-bin*)
+                        if [[ ${#opt} -eq 10 ]]; then   
+                            parse_state=8;
+                        else
+                            cuda_bin=${opt##"--cuda-bin="};
+                        fi;
+                        ;;
+                    --gpu-arch*)
+                        if [[ ${#opt} -eq 10 ]]; then 
+                            parse_state=9; 
+                        else 
+                            gpu_arch=${opt##"--gpu-arch="}; 
+                        fi;
+                        ;;
                     --suffix*)
                         if [[ ${#opt} -eq 8 ]]; then
                             parse_state=7;
@@ -255,13 +282,16 @@ EOF
                     --no-cleanup)
                         cleanup=false;
                         ;;
-                    -lstdc++)
+                    -lstdc++)   
                         libstdcpp_added=true
                         ;;
-                    *.c | *.cpp)
+                    *.c | *.cpp | *.cu)
                         input_files="$input_files $opt";
+                        if [[ "$opt" == *.cu ]]; then
+                            cuda_mode=true;
+                        fi
                         # Check if it's a .cpp file and if -lstdc++ hasn't been added yet
-                        if [[ "$opt" == *.cpp ]] && [[ "$libstdcpp_added" == false ]]; then
+                        if [[ "$opt" == *.cpp || "$opt" == *.cu ]] && [[ "$libstdcpp_added" == false ]]; then
                             clang_options="$clang_options -lstdc++"
                             libstdcpp_added=true 
                         fi
@@ -297,9 +327,16 @@ EOF
                 parse_state=0;
                 ;;
             7)
-              suffix="-$opt";
-              parse_state=0;
-              ;;
+                suffix="-$opt";
+                parse_state=0;
+                ;;
+            8)
+                cuda_bin="$opt"
+                parse_state=0;
+                ;;
+            9)  gpu_arch="$opt";
+                parse_state=0;
+                ;;
       esac
     done
 
@@ -327,6 +364,8 @@ EOF
     CLANG="${llvm_bin}/clang${suffix}" 
     OPT="${llvm_bin}/opt${suffix}"
     LLVM_LINK="${llvm_bin}/llvm-link${suffix}"
+    LLC="${llvm_bin}/llc${suffix}"
+    NVCC="${cuda_bin}/nvcc"
 
     if [[ -n "$config_file" ]]; then
         CLANG="${CLANG} --config ${config_file}"
@@ -488,6 +527,212 @@ run_aspis() {
     success_msg "Done!"
 }
 
+run_aspis_cuda() {
+    # Check if nvcc exists, otherwise try to find it in PATH
+    if [[ ! -x "$NVCC" ]]; then
+        if which nvcc >/dev/null 2>&1; then
+            NVCC="nvcc"
+        else
+            error_msg "nvcc not found. Please ensure CUDA is installed and in your PATH, or specify --cuda-bin."
+        fi
+    fi
+
+    if [[ -z "$cuda_bin" && "$NVCC" == "nvcc" ]]; then
+        cuda_bin=$(dirname "$(which nvcc)")
+    fi
+    local cuda_home=$(dirname "$cuda_bin") 
+
+    if [[ ! -f "$LLC" ]]; then
+        error_msg "Command llc not found. Expected path: ${LLC}. Please check --llvm-bin parameter."
+    fi
+
+    clang_options="$clang_options -I${cuda_home}/include"
+    if [[ -n "$cuspis_path" ]]; then
+        clang_options="$clang_options -I$cuspis_path"
+    fi
+
+    if [[ -z ${input_files} ]]; then
+        error_msg "No input files provided."
+    fi
+
+    exe mkdir -p $build_dir
+    exe rm -f $build_dir/*.ll
+
+    title_msg "Compiling Device Code to IR"
+
+    device_ir_files=""
+    for input_file in $input_files; do
+        filename=$(basename "$input_file" | sed 's/\.[^.]*$//')
+        exe $CLANG $clang_options -x cuda --cuda-path="$cuda_home" --cuda-gpu-arch=$gpu_arch --cuda-device-only -emit-llvm -S "$input_file" -o "$build_dir/${filename}_device.ll" -O0 -Xclang -disable-O0-optnone
+        device_ir_files="$device_ir_files $build_dir/${filename}_device.ll"
+    done
+
+    exe $LLVM_LINK $device_ir_files -o $build_dir/device_linked.ll
+
+    if [[ $debug_enabled == false ]]; then
+        exe $OPT --passes="strip" $build_dir/device_linked.ll -o $build_dir/device_linked.ll
+        echo "  Debug mode disabled, stripped debug symbols."
+    fi
+
+    title_msg "Applying ASPIS Passes to Device Code"
+
+    exe $OPT --passes="lower-switch" $build_dir/device_linked.ll -o $build_dir/device_linked.ll
+
+    ## FuncRetToRef
+    if [[ dup -ne -1 ]]; then
+        exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="func-ret-to-ref" $build_dir/device_linked.ll -o $build_dir/device_linked.ll
+    fi;
+
+    title_msg "Device-side ASPIS transformations"
+    ## DATA PROTECTION
+    case $dup in
+        0) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="eddi-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $eddi_options
+            ;;
+        1) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libSEDDI.so --passes="eddi-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $eddi_options
+            ;;
+        2) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libFDSC.so --passes="eddi-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $eddi_options
+            ;;
+        3)
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libREDDI.so --passes="eddi-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $eddi_options
+            ;;
+        *)
+            echo -e "\t--no-dup specified!"
+    esac
+    success_msg "Applied device-side data protection passes."
+
+    exe $OPT --passes="simplifycfg" $build_dir/device_linked.ll -o $build_dir/device_linked.ll
+
+    title_msg "Device-side CFC"
+    ## CONTROL-FLOW CHECKING
+    case $cfc in
+        0) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libCFCSS.so --passes="cfcss-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $cfc_options
+            ;;
+        1) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libRASM.so --passes="rasm-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $cfc_options
+            ;;
+        2) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libINTER_RASM.so --passes="rasm-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $cfc_options
+            ;;
+        3)
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libRACFED.so --passes="racfed-verify" $build_dir/device_linked.ll -o $build_dir/device_linked.ll $cfc_options
+            ;;
+        *)
+            echo -e "\t--no-cfc specified!"
+    esac
+    success_msg "Applied device-side CFC passes."
+
+    ## DuplicateGlobals
+    if [[ dup -ne -1 ]]; then
+        exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="duplicate-globals" $build_dir/device_linked.ll -o $build_dir/device_linked.ll -S $eddi_options
+        success_msg "Duplicated globals."
+    fi;
+
+    title_msg "Compiling Device IR to PTX and Fatbinary"
+
+    exe $LLC -march=nvptx64 -mcpu=$gpu_arch $build_dir/device_linked.ll -o $build_dir/device.ptx
+
+    exe $NVCC -fatbin -arch=$gpu_arch $build_dir/device.ptx -o $build_dir/device.fatbin
+
+
+    title_msg "Compiling Host Code to IR"
+
+    host_objects=""
+    for input_file in $input_files; do
+        filename=$(basename "$input_file" | sed 's/\.[^.]*$//')
+        exe $CLANG $clang_options -x cuda --cuda-path="$cuda_home" --cuda-host-only --cuda-gpu-arch=$gpu_arch -Xclang -fcuda-include-gpubinary -emit-llvm -S -Xclang $build_dir/device.fatbin -c "$input_file" -o "$build_dir/${filename}_host.ll"
+        host_objects="$host_objects $build_dir/${filename}_host.ll"
+    done
+    
+    exe $LLVM_LINK $host_objects -o $build_dir/host_linked.ll
+
+    if [[ $debug_enabled == false ]]; then
+        exe $OPT --passes="strip" $build_dir/host_linked.ll -o $build_dir/host_linked.ll
+        echo "  Debug mode disabled, stripped debug symbols."
+    fi 
+
+    title_msg "Applying ASPIS passes to Host Code"
+    
+    exe $OPT --passes="lower-switch" $build_dir/host_linked.ll -o $build_dir/host_linked.ll
+
+    ## FuncRetToRef
+    if [[ dup -ne -1 ]]; then
+        exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="func-ret-to-ref" $build_dir/host_linked.ll -o $build_dir/host_linked.ll
+    fi;
+
+    title_msg "Host-side ASPIS transformations"
+    ## DATA PROTECTION
+    case $dup in
+        0) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="eddi-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $eddi_options
+            ;;
+        1) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libSEDDI.so --passes="eddi-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $eddi_options
+            ;;
+        2) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libFDSC.so --passes="eddi-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $eddi_options
+            ;;
+        3)
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libREDDI.so --passes="eddi-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $eddi_options
+            ;;
+        *)
+            echo -e "\t--no-dup specified!"
+    esac
+    success_msg "Applied host-side data protection passes."
+
+    exe $OPT --passes="simplifycfg" $build_dir/host_linked.ll -o $build_dir/host_linked.ll
+
+    title_msg "Host-side CFC"
+    ## CONTROL-FLOW CHECKING
+    case $cfc in
+        0) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libCFCSS.so --passes="cfcss-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $cfc_options
+            ;;
+        1) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libRASM.so --passes="rasm-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $cfc_options
+            ;;
+        2) 
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libINTER_RASM.so --passes="rasm-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $cfc_options
+            ;;
+        3)
+            exe $OPT -load-pass-plugin=$DIR/build/passes/libRACFED.so --passes="racfed-verify" $build_dir/host_linked.ll -o $build_dir/host_linked.ll $cfc_options
+            ;;
+        *)
+            echo -e "\t--no-cfc specified!"
+    esac
+    success_msg "Applied host-side CFC passes."
+
+    ## DuplicateGlobals
+    if [[ dup -ne -1 ]]; then
+        exe $OPT -load-pass-plugin=$DIR/build/passes/libEDDI.so --passes="duplicate-globals" $build_dir/host_linked.ll -o $build_dir/host_linked.ll -S $eddi_options
+        success_msg "Duplicated globals."
+    fi;
+
+    title_msg "Linking"
+
+    if [[ -d "${cuda_home}/lib64" ]]; then
+        cuda_lib_dir="${cuda_home}/lib64"
+    else
+        cuda_lib_dir="${cuda_home}/lib"
+    fi
+
+    exe $CLANG $clang_options $build_dir/host_linked.ll -o $output_file -L"$cuda_lib_dir" -Wl,-rpath,"$cuda_lib_dir" -lcudart -ldl -lrt -lpthread
+
+    if [[ $cleanup == true ]]; then
+        rm -f $build_dir/*.ll $build_dir/*.ptx $build_dir/*.fatbin $build_dir/*.o
+        success_msg "Cleaned cached files."
+    fi
+
+    success_msg "Done! Output: $output_file"
+}
+
 parse_commands "$@"
 perform_platform_checks $CLANG $OPT $LLVM_LINK
-run_aspis
+if [[ $cuda_mode == true ]]; then  
+    run_aspis_cuda
+else
+    run_aspis
+fi
