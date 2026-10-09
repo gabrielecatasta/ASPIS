@@ -11,6 +11,7 @@
 #include <list>
 #include <fstream>
 #include <iostream>
+#include <llvm-21/llvm/ADT/StringRef.h>
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/Support/Debug.h"
 
@@ -100,6 +101,20 @@ void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* fi
   file.close();
 }
 
+bool isCudaRuntimeFunction(Function &Fn) {
+  StringRef Name = Fn.getName();
+  return Name.contains("cuda")         ||
+         Name.contains("__cuda")       ||
+         Name.starts_with("cudart")    ||
+         Name.contains("fatbinary")    ||
+         Name.contains("cudaRegister");
+}
+
+bool isCuspisFunction(Function &Fn) {
+  StringRef Name = Fn.getName();
+  return Name.starts_with("_ZN6CUSPIS") || Name.starts_with("_ZNK6CUSPIS");
+}
+
 bool shouldCompile(Function &Fn, 
     const std::map<Value*, StringRef> &FuncAnnotations,
     const std::set<Function*> &OriginalFunctions) {
@@ -119,7 +134,9 @@ bool shouldCompile(Function &Fn,
       (!FuncAnnotations.find(&Fn)->second.starts_with("exclude") &&
       !FuncAnnotations.find(&Fn)->second.starts_with("to_duplicate")))
       // nor it is one of the original functions
-      && OriginalFunctions.find(&Fn) == OriginalFunctions.end();
+      && OriginalFunctions.find(&Fn) == OriginalFunctions.end()
+      && !isCudaRuntimeFunction(Fn)
+      && !isCuspisFunction(Fn);
 }
 
 DebugLoc findNearestDebugLoc(Instruction &I) {

@@ -35,6 +35,10 @@ void getFuncAnnotations(Module &Md, std::map<Value*, StringRef> &FuncAnnotations
 // Inserts the names of the compiled functions as a csv into the file passed as parameter
 void persistCompiledFunctions(std::set<Function*> &CompiledFuncs, const char* filename);
 
+bool isCudaRuntimeFunction(Function &Fn);
+
+bool isCuspisFunction(Function &Fn);
+
 bool shouldCompile(Function &Fn, 
     const std::map<Value*, StringRef> &FuncAnnotations,
     const std::set<Function*> &OriginalFunctions = std::set<Function*>());

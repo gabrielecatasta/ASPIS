@@ -10,6 +10,8 @@
 #include "ASPIS.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/Statistic.h"
+#include <llvm-21/llvm/IR/Instruction.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -338,6 +340,18 @@ void EDDI::preprocess(Module &Md) {
 
   LLVM_DEBUG(dbgs() << "Getting annotations... ");
   getFuncAnnotations(Md, FuncAnnotations);
+  LLVM_DEBUG(dbgs() << "[done]\n\n");
+
+  // iterate over every function annotation and store the pointers to duplicate-aware
+  // variants of CUSPIS functions
+  LLVM_DEBUG(dbgs() << "Storing pointers to duplicate-aware CUSPIS variants...");
+  for (auto &Entry : FuncAnnotations) {
+    if (Entry.second.starts_with("cuspis_dup_of:") && (isa<Function>(Entry.first))) {
+      StringRef Base = Entry.second.substr(strlen("cuspis_dup_of:"));
+      Base = Base.substr(0, Base.size() - 1);
+      CuspisDupVariants[Base.str()] = cast<Function>(Entry.first);
+    }
+  }
   LLVM_DEBUG(dbgs() << "[done]\n\n");
 
   // Getting the explicit `to_harden` functions and Values
@@ -1098,7 +1112,8 @@ void EDDI::fixFuncValsPassedByReference(
       if (Duplicate != nullptr) {
         Value *Original = Operand;
         Value *Copy = Duplicate;
-        if(Original->getType()->isPointerTy() && Copy->getType()->isPointerTy()) {
+        if(Original->getType()->isPointerTy() && Copy->getType()->isPointerTy() &&
+            !DeviceReplicaSlots.count(Copy)) {
           Type *OriginalType = Original->getType();
           Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
           Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
@@ -1466,9 +1481,35 @@ int EDDI::duplicateInstruction(Instruction &I, BasicBlock &ErrBB) {
   else if (isa<CallBase>(I) && DuplicatedCalls.find(&I) == DuplicatedCalls.end()) {
     DuplicatedCalls.insert(&I);
     CallBase *CInstr = cast<CallBase>(&I);
+
     // there are some instructions that can be annotated with "to_duplicate" in
     // order to tell the pass to duplicate the function call.
     Function *Callee = CInstr->getCalledFunction();
+
+    if (Callee != NULL && isCuspisFunction(*Callee)) {
+      for (Value *V : CInstr->args()) {
+        if (isa<Instruction>(V)) {
+          Instruction *Op = cast<Instruction>(V);
+          if (!isValueDuplicated(*Op))
+            duplicateInstruction(*Op, ErrBB);
+        }
+      }
+
+      // mark as already handled so EDDI does not duplicate it again
+      DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(CInstr, CInstr));
+
+      if (Callee->getName().contains("cuspisMalloc"))
+        emitShadowPointer(CInstr);
+
+      if (Callee->getName().contains("cuspisMemcpyToDevice") && CInstr->arg_size() == 3)
+        rewriteCuspisMemcpyToDevice(CInstr);
+
+      if (Callee->getName().contains("cuspisMemcpyToHost") && CInstr->arg_size() == 3)
+        rewriteCuspisMemcpyToHost(CInstr);
+
+      return 0;
+    }
+
     Callee = getFunctionFromDuplicate(Callee);
 
     if(CInstr->getCalledFunction() != NULL && isToExcludeName(CInstr->getCalledFunction()->getName())) {
@@ -1675,6 +1716,121 @@ Type *getValueType(Value *Arg, Align *ArgAlign) {
     }
   }
 }
+
+/**
+ * After a cuspisMalloc call, point the EDDI duplicate of the pointer slot at
+ * replica 1 inside the over-allocation made by CUSPIS.
+ */
+void EDDI::emitShadowPointer(CallBase *CInstr) {
+  Value *Slot = CInstr->getArgOperand(0); // T **devPtr (i.e., address of pointer variable)
+  Value *Size = CInstr->getArgOperand(1); // size of the replica
+
+  Value *SlotDup = getDuplicateValue(Slot, CInstr);
+  if (!SlotDup) {
+    errs() << "WARNING - cuspisMalloc slot has no duplicate: " << *CInstr << "\n";
+    return;
+  }
+
+  IRBuilder<> B(CInstr);
+  if (!isa<InvokeInst>(CInstr))
+    // insertion point is right after the call
+    B.SetInsertPoint(CInstr->getNextNonDebugInstruction());
+  // invoke has two successors, so go to the normal destination block (call has succeded)
+  // and set insertion point to its first usable position (i.e., after
+  // eventual PHI nodes).
+  else
+    B.SetInsertPoint(&*cast<InvokeInst>(CInstr)->getNormalDest()->getFirstInsertionPt());
+
+  // compute and store the overallocated replica-1 address in the duplicated pointer variable
+  Value *Base = B.CreateLoad(B.getPtrTy(), Slot, "cuspis.base");
+  Value *Shadow = B.CreateGEP(B.getInt8Ty(), Base, Size, "cuspis.replica1");
+  Value *St = B.CreateStore(Shadow, SlotDup);
+
+  // mark as already handled so EDDI does not duplicate them
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Base, Base));
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(Shadow, Shadow));
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value *>(St, St));
+
+  // to perform a check and prevent the device-side pointer getting rewritten by fixFuncValsPassedByReference
+  DeviceReplicaSlots.insert(SlotDup);
+}
+
+int EDDI::rewriteCuspisMemcpyToDevice(CallBase *CInstr) {
+  auto Variant = CuspisDupVariants.find("cuspisMemcpyToDevice");
+  if (Variant == CuspisDupVariants.end()) {
+    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToDevice\n";
+    return 0;
+  }
+
+  Function *DupAwareFn = Variant->second;
+
+  Value *Src = CInstr->getArgOperand(1);
+  auto SrcDup = getDuplicateValue(Src, CInstr);
+  if (!SrcDup) {
+    errs() << "WARNING - cuspisMemcpyToDevice 'src' has no duplicate: " << *CInstr << "\n";
+    return 0;
+  }
+
+  IRBuilder<> B(CInstr);
+  Value *Args[] = { CInstr->getArgOperand(0), Src, SrcDup, CInstr->getArgOperand(2) };
+
+  Instruction *NewCall;
+  if (isa<InvokeInst>(CInstr)) {
+    InvokeInst *IInst = cast<InvokeInst>(CInstr);
+    NewCall = B.CreateInvoke(DupAwareFn->getFunctionType(), DupAwareFn,
+                              IInst->getNormalDest(), IInst->getUnwindDest(), Args);
+  } else {
+    NewCall = B.CreateCall(DupAwareFn->getFunctionType(), DupAwareFn, Args);
+  }
+
+  if (DebugEnabled)
+    NewCall->setDebugLoc(CInstr->getDebugLoc());
+  CInstr->replaceNonMetadataUsesWith(NewCall);
+
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value*>(NewCall, NewCall));
+
+  errs() << "EDDI: rewrote cuspisMemcpyToDevice with src_dup\n";
+  return 1;
+}
+
+int EDDI::rewriteCuspisMemcpyToHost(CallBase *CInstr) {
+  auto Variant = CuspisDupVariants.find("cuspisMemcpyToHost");
+  if (Variant == CuspisDupVariants.end()) {
+    errs() << "WARNING - no duplicate-aware variant declared for cuspisMemcpyToHost\n";
+    return 0;
+  }
+
+  Function *DupAwareFn = Variant->second;
+
+  Value *Dst = CInstr->getArgOperand(0);
+  auto DstDup = getDuplicateValue(Dst, CInstr);
+  if (!DstDup) {
+    errs() << "WARNING - cuspisMemcpyToDevice 'dst' has no duplicate: " << *CInstr << "\n";
+    return 0;
+  }
+
+  IRBuilder<> B(CInstr);
+  Value *Args[] = { Dst, DstDup, CInstr->getArgOperand(1), CInstr->getArgOperand(2) };
+
+  Instruction *NewCall;
+  if (isa<InvokeInst>(CInstr)) {
+    InvokeInst *IInst = cast<InvokeInst>(CInstr);
+    NewCall = B.CreateInvoke(DupAwareFn->getFunctionType(), DupAwareFn,
+                              IInst->getNormalDest(), IInst->getUnwindDest(), Args);
+  } else {
+    NewCall = B.CreateCall(DupAwareFn->getFunctionType(), DupAwareFn, Args);
+  }
+
+  if (DebugEnabled)
+    NewCall->setDebugLoc(CInstr->getDebugLoc());
+  CInstr->replaceNonMetadataUsesWith(NewCall);
+
+  DuplicatedInstructionMap.insert(std::pair<Value *, Value*>(NewCall, NewCall));
+
+  errs() << "EDDI: rewrote cuspisMemcpyToHost with host_dup\n";
+  return 1;
+}
+
 
 /**
  * @brief I have to duplicate all instructions except function calls and branches

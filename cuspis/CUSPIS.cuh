@@ -25,7 +25,10 @@ namespace CUSPIS {
             size_t size;
             void *data;
 
-        public: 
+        public:
+            MemAllocation() :
+                data(nullptr), size(0) {}
+
             MemAllocation(void *data, size_t size) :
                 data(data), size(size) {}
 
@@ -42,7 +45,14 @@ namespace CUSPIS {
             }
     };
 
-    std::list<MemAllocation> allocations;
+    static constexpr int MAX_ALLOCATIONS=64;
+
+    // annotate as "exclude" to prevent double bookkeeping with EDDI
+    //__attribute__ ((annotate("exclude"))) std::list<MemAllocation> allocations;
+    // TODO: investigate problem with std::list
+
+    __attribute__((annotate("exclude"))) MemAllocation allocations[MAX_ALLOCATIONS];
+    __attribute__((annotate("cuspis"))) int num_allocations = 0;
 
     template <typename ... Types>
     class Kernel {
@@ -57,14 +67,21 @@ namespace CUSPIS {
 
             template <typename T>
             void modify (T **x) {
-                for (auto Elem : allocations) {
+                /*for (auto Elem : allocations) {
                     auto size = Elem.isInMemAllocation(*x);
                     if (size) {
                         *x = (T*)(((char*)*x) + size);
                         break;
                     }
+                }*/
+                for (int i = 0; i < num_allocations; i++) {
+                    auto size = allocations[i].isInMemAllocation(*x);
+                    if (size) {
+                        *x = (T*)(((char*)*x) + size);
+                        break;
+                    }
                 }
-            }
+            } 
 
             template <typename T, typename... Args>
             void modify (T *x, Args... args) {
@@ -138,7 +155,8 @@ namespace CUSPIS {
      */
     template <class T> cudaError_t __attribute__((annotate("cuspis"))) cuspisMalloc(T **devPtr, size_t size) {
         auto res = cudaMalloc(devPtr, size * NUM_REPLICAS);
-        allocations.push_back(MemAllocation(*devPtr, size));
+        // allocations.push_back(MemAllocation(*devPtr, size));
+        allocations[num_allocations++] = MemAllocation(*devPtr, size);
         return res;
     }
 
@@ -147,7 +165,7 @@ namespace CUSPIS {
      */
     template <class T> cudaError_t __attribute__((annotate("cuspis"))) cuspisFree(T **devPtr) {  
         // TODO fix this garbage below -----------v
-        auto i=allocations.begin();
+        /*auto i=allocations.begin();
         for (auto Elem : allocations) {
             auto size = Elem.isInMemAllocation(*devPtr);
             if (size) {
@@ -155,8 +173,17 @@ namespace CUSPIS {
                 break;
             }
             i++;
+        }*/
+        for (int i = 0; i < num_allocations; i++) {
+            if (allocations[i].isInMemAllocation(*devPtr)) {
+                num_allocations--;
+                if (i != num_allocations)
+                    allocations[i] = allocations[num_allocations];
+                break;
+            }
         }
-        return cudaFree(devPtr);
+
+        return cudaFree(*devPtr);
     }
 
     /**
@@ -171,6 +198,34 @@ namespace CUSPIS {
         return cudaSuccess;
     }
 
+    /**
+     * Variant for ASPIS EDDI, verifying the source buffer against its duplicate.
+     * `src` and `src_dup` are compared before the copy, so a host-side corruption cannot reach both replicas unnoticed. 
+     * The pass rewrites 3-arg calls into this form.
+     */
+    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToDevice"),
+            used)) // guarantee the 4-arg function exists in the module with 'used' 
+      cuspisMemcpyToDevice(void *dst, const void *src, const void *src_dup, size_t count) {
+        if (src_dup != src && memcmp(src, src_dup, count) != 0) {
+            for (size_t i = 0; i < count; i++) {
+                if (((const char*)src)[i] != ((const char*)src_dup)[i])
+                    return DataCorruption_Handler(dst, i);
+            }
+        }
+
+        auto ret = cudaMemcpy(dst, src, count, cudaMemcpyHostToDevice);
+        if (ret != cudaSuccess)
+            return ret;
+
+        if constexpr (NUM_REPLICAS == 2) {
+            ret = cudaMemcpy((char*)dst + count, src_dup, count, cudaMemcpyHostToDevice);
+            if (ret != cudaSuccess)
+                return ret;
+        }
+        
+        return ret;
+    }
+    
     /**
      * Wrapper of the cudaMemcpy function, from device to host.
      * 
@@ -206,6 +261,38 @@ namespace CUSPIS {
 
         return ret;
 
+    }
+
+    /**
+     * Variant for ASPIS EDDI, filling both the original and duplicated destination buffers.
+     * `dst` receives replica 0, `dst_dup` receives replica 1, and the two are compared before returning. 
+     * The pass rewrites 3-arg calls into this form.
+     */
+    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToHost"), used)) // guarantee the 4-arg function exists in the module with 'used' 
+      cuspisMemcpyToHost(void *dst, void *dst_dup, const void *src, size_t count) {
+        if constexpr (NUM_REPLICAS == 1) {
+            auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
+            if (ret == cudaSuccess && dst_dup != dst)
+                memcpy(dst_dup, dst, count);
+            return ret;
+        }
+
+        auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
+        if (ret != cudaSuccess)
+            return ret;
+
+        ret = cudaMemcpy(dst_dup, (char*)src + count, count, cudaMemcpyDeviceToHost);
+        if (ret != cudaSuccess)
+            return ret;
+
+        if (memcmp(dst, dst_dup, count) != 0) {
+            for (int i = 0; i < count; i++) {
+                if (((char*)dst)[i] != ((char*)dst_dup)[i])
+                    return DataCorruption_Handler(dst, i);
+            }
+        }
+
+        return ret;
     }
 }
 

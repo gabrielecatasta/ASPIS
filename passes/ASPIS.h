@@ -4,11 +4,13 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Pass.h"
+#include <llvm-21/llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include "Utils/Utils.h"
 #include "TypeDeductionAnalysis.hpp"
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 
 using namespace llvm;
@@ -42,8 +44,10 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::set<Function*> toHardenFunctions;
         std::set<Value*> toHardenVariables;
         std::set<Value*> DuplicatedCalls;
+        std::unordered_map<std::string, Function *> CuspisDupVariants;
         std::unordered_multimap<Value *, Value *> DuplicatedInstructionMap;
         std::unordered_set<Instruction *> ClonedInstructions;
+        std::unordered_set<Value *> DeviceReplicaSlots;
 
         tda::TypeDeductionAnalysis tda;
         tda::TypeDeductionAnalysis::Result deducedTypes;
@@ -75,6 +79,9 @@ class EDDI : public PassInfoMixin<EDDI> {
         int duplicateInstruction (Instruction &I, BasicBlock &ErrBB);
         bool isValueDuplicated(Instruction &V);
         Function *duplicateFnArgs(Function &Fn, Module &Md);
+        void emitShadowPointer(CallBase *CInstr);
+        int rewriteCuspisMemcpyToDevice(CallBase *CInstr);
+        int rewriteCuspisMemcpyToHost(CallBase *CInstr);
         void CreateErrBB(Module &Md, Function &Fn, BasicBlock *ErrBB);
         bool temporaryArgumentDuplication(Module &Md, llvm::Value *value, IRBuilder<> &B);
         Value *getDuplicateValue(Value *V, Instruction *I);
