@@ -35,9 +35,11 @@ int run_axpy(CUSPIS::cuspisRedundancyPolicy policy, float *host_x, int N) {
 int main(int argc, char* argv[]) {
     int SIZES = 1024;
 
+    // TODO: fix the following
+    /*
     if (argc > 1) {
         SIZES = atoi(argv[1]);
-    }
+    } */
 
     float avg = 0.0;
     FILE *fp_blocks = fopen("axpy_b.txt", "w");

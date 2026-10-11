@@ -342,15 +342,17 @@ void EDDI::preprocess(Module &Md) {
   getFuncAnnotations(Md, FuncAnnotations);
   LLVM_DEBUG(dbgs() << "[done]\n\n");
 
-  // iterate over every function annotation and store the pointers to duplicate-aware
+  // iterate over every function names and store the pointers to duplicate-aware
   // variants of CUSPIS functions
   LLVM_DEBUG(dbgs() << "Storing pointers to duplicate-aware CUSPIS variants...");
-  for (auto &Entry : FuncAnnotations) {
-    if (Entry.second.starts_with("cuspis_dup_of:") && (isa<Function>(Entry.first))) {
-      StringRef Base = Entry.second.substr(strlen("cuspis_dup_of:"));
-      Base = Base.substr(0, Base.size() - 1);
-      CuspisDupVariants[Base.str()] = cast<Function>(Entry.first);
-    }
+  for (Function &F : Md) {
+    if (!isCuspisFunction(F) || F.arg_size() != 4)
+      continue;
+    StringRef Name = F.getName();
+    if (Name.contains("cuspisMemcpyToDevice"))
+      CuspisDupVariants["cuspisMemcpyToDevice"] = &F;
+    else if (Name.contains("cuspisMemcpyToHost"))
+      CuspisDupVariants["cuspisMemcpyToHost"] = &F;
   }
   LLVM_DEBUG(dbgs() << "[done]\n\n");
 
@@ -1502,10 +1504,10 @@ int EDDI::duplicateInstruction(Instruction &I, BasicBlock &ErrBB) {
         emitShadowPointer(CInstr);
 
       if (Callee->getName().contains("cuspisMemcpyToDevice") && CInstr->arg_size() == 3)
-        rewriteCuspisMemcpyToDevice(CInstr);
+        return rewriteCuspisMemcpyToDevice(CInstr);
 
       if (Callee->getName().contains("cuspisMemcpyToHost") && CInstr->arg_size() == 3)
-        rewriteCuspisMemcpyToHost(CInstr);
+        return rewriteCuspisMemcpyToHost(CInstr);
 
       return 0;
     }

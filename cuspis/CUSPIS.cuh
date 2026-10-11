@@ -9,6 +9,8 @@
 #include <list>
 #include <vector>
 
+// TODO: write a pragma to centralize annotation of global variables and member functions
+
 namespace CUSPIS {
 
     constexpr int NUM_REPLICAS = 2;
@@ -26,15 +28,18 @@ namespace CUSPIS {
             void *data;
 
         public:
+            __attribute__((annotate("exclude")))
             MemAllocation() :
                 data(nullptr), size(0) {}
 
+            __attribute__((annotate("exclude")))
             MemAllocation(void *data, size_t size) :
                 data(data), size(size) {}
 
             /**
              * Returns the size of the data stored in `ptr` if the pointer is in this memory allocation object, 0 otherwise.
              */
+            __attribute__((annotate("exclude")))
             size_t isInMemAllocation(void *ptr) {
                 if (data <= ptr && ptr < (void*)(((char*)(data)) + size)) {
                     return size;
@@ -52,7 +57,7 @@ namespace CUSPIS {
     // TODO: investigate problem with std::list
 
     __attribute__((annotate("exclude"))) MemAllocation allocations[MAX_ALLOCATIONS];
-    __attribute__((annotate("cuspis"))) int num_allocations = 0;
+    __attribute__((annotate("exclude"))) int num_allocations = 0;
 
     template <typename ... Types>
     class Kernel {
@@ -62,16 +67,18 @@ namespace CUSPIS {
             void (*kernelFunc)(Types ...args);
             cuspisRedundancyPolicy policy;
 
+            __attribute__((annotate("exclude")))
             void modify () {
             }
 
             template <typename T>
+            __attribute__((annotate("exclude")))
             void modify (T **x) {
                 /*for (auto Elem : allocations) {
                     auto size = Elem.isInMemAllocation(*x);
                     if (size) {
                         *x = (T*)(((char*)*x) + size);
-                        break;
+                        break;  
                     }
                 }*/
                 for (int i = 0; i < num_allocations; i++) {
@@ -84,14 +91,16 @@ namespace CUSPIS {
             } 
 
             template <typename T, typename... Args>
+            __attribute__((annotate("exclude")))
             void modify (T *x, Args... args) {
                 modify(args...);
             }
 
             template <typename T, typename... Args>
+            __attribute__((annotate("exclude")))
             void modify (T **x, Args... args) {
-                for (auto Elem : allocations) {
-                    auto size = Elem.isInMemAllocation(*x);
+                for (int i = 0; i < num_allocations; i++) {
+                    auto size = allocations[i].isInMemAllocation(*x);
                     if (size) {
                         *x = (T*)(((char*)*x) + size);
                         break;
@@ -102,15 +111,19 @@ namespace CUSPIS {
             }
 
         public:
+            __attribute__((annotate("exclude")))
             Kernel(int Dg, int Db, void (*kernel)(Types ...args), cuspisRedundancyPolicy policy) :
                 Dg(Dg), Db(Db), kernelFunc(kernel), policy(policy) {}
 
+            __attribute__((annotate("exclude")))
             Kernel(int Dg, int Db, int Ns, void (*kernel)(Types ...args), cuspisRedundancyPolicy policy) :
                 Dg(Dg), Db(Db), Ns(Ns), kernelFunc(kernel), policy(policy) {}
 
+            __attribute__((annotate("exclude")))
             Kernel(int Dg, int Db, int Ns, cudaStream_t S, void (*kernel)(Types ...args), cuspisRedundancyPolicy policy) :
                 Dg(Dg), Db(Db), Ns(Ns), S(S), kernelFunc(kernel), policy(policy) {}
 
+            __attribute__((annotate("exclude")))
             void launch(Types ...args) {
                 if constexpr (NUM_REPLICAS == 1) {
                     kernelFunc<<<Dg, Db, Ns, S>>>(args...);
@@ -142,6 +155,7 @@ namespace CUSPIS {
             }
     };
 
+    __attribute__((annotate("exclude")))
     cudaError_t DataCorruption_Handler(void* dst, int index) {
         std::cout << index << "\n";
         fprintf(stderr, "Data corruption detected, aborting.\n");
@@ -153,7 +167,7 @@ namespace CUSPIS {
      * 
      * Allocates `NUM_REPLICAS` times the size required by the malloc 
      */
-    template <class T> cudaError_t __attribute__((annotate("cuspis"))) cuspisMalloc(T **devPtr, size_t size) {
+    template <class T> cudaError_t __attribute__((annotate("exclude"))) cuspisMalloc(T **devPtr, size_t size) {
         auto res = cudaMalloc(devPtr, size * NUM_REPLICAS);
         // allocations.push_back(MemAllocation(*devPtr, size));
         allocations[num_allocations++] = MemAllocation(*devPtr, size);
@@ -163,7 +177,7 @@ namespace CUSPIS {
     /** 
      * Wrapper of the cudaFree() function. 
      */
-    template <class T> cudaError_t __attribute__((annotate("cuspis"))) cuspisFree(T **devPtr) {  
+    template <class T> cudaError_t __attribute__((annotate("exclude"))) cuspisFree(T **devPtr) {  
         // TODO fix this garbage below -----------v
         /*auto i=allocations.begin();
         for (auto Elem : allocations) {
@@ -191,7 +205,7 @@ namespace CUSPIS {
      * 
      * Copies two times the data from the host to the device.
      */
-    inline cudaError_t __attribute__((annotate("cuspis"))) cuspisMemcpyToDevice(void *dst, const void *src, size_t count) {
+    inline cudaError_t __attribute__((annotate("exclude"))) cuspisMemcpyToDevice(void *dst, const void *src, size_t count) {
         for (int i=0; i<NUM_REPLICAS; i++) {
             cudaMemcpy((char*)dst + (count*i), src, count, cudaMemcpyHostToDevice);
         }
@@ -203,7 +217,7 @@ namespace CUSPIS {
      * `src` and `src_dup` are compared before the copy, so a host-side corruption cannot reach both replicas unnoticed. 
      * The pass rewrites 3-arg calls into this form.
      */
-    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToDevice"),
+    inline cudaError_t __attribute__((annotate("exclude"),
             used)) // guarantee the 4-arg function exists in the module with 'used' 
       cuspisMemcpyToDevice(void *dst, const void *src, const void *src_dup, size_t count) {
         if (src_dup != src && memcmp(src, src_dup, count) != 0) {
@@ -231,7 +245,7 @@ namespace CUSPIS {
      * 
      * Copies the data from the device to the host.
      */
-    inline cudaError_t __attribute__((annotate("cuspis"))) cuspisMemcpyToHost(void *dst, const void *src, size_t count) {
+    inline cudaError_t __attribute__((annotate("exclude"))) cuspisMemcpyToHost(void *dst, const void *src, size_t count) {
         if constexpr (NUM_REPLICAS == 1)
             return cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
 
@@ -268,7 +282,7 @@ namespace CUSPIS {
      * `dst` receives replica 0, `dst_dup` receives replica 1, and the two are compared before returning. 
      * The pass rewrites 3-arg calls into this form.
      */
-    inline cudaError_t __attribute__((annotate("cuspis_dup_of:cuspisMemcpyToHost"), used)) // guarantee the 4-arg function exists in the module with 'used' 
+    inline cudaError_t __attribute__((annotate("exclude"), used)) // guarantee the 4-arg function exists in the module with 'used' 
       cuspisMemcpyToHost(void *dst, void *dst_dup, const void *src, size_t count) {
         if constexpr (NUM_REPLICAS == 1) {
             auto ret = cudaMemcpy(dst, src, count, cudaMemcpyDeviceToHost);
