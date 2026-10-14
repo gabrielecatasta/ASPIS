@@ -11,6 +11,7 @@
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/Statistic.h"
 #include <llvm-21/llvm/IR/Instruction.h>
+#include <llvm-21/llvm/IR/Operator.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Function.h"
@@ -1094,6 +1095,51 @@ void EDDI::compareValues(std::vector<Value *> *CmpInstructions, Value &V1, Value
   }
 }
 
+// Given an Operand, check whether it comes from a pointer that is registered
+// as a device replica slot
+bool deriveFromDeviceReplica(Value *V, const std::unordered_set<Value *> &Slots) {
+  std::unordered_set<Value *> Visited;
+  std::vector<Value *> ToProcess{V};
+
+  while (!(ToProcess.empty())) {
+    Value *Cur = ToProcess.back();
+    ToProcess.pop_back();
+    // skip if value is already in the set
+    if (!Visited.insert(Cur).second)
+      continue;
+    if (Slots.count(Cur))
+      return true;
+    if (isa<LoadInst>(Cur)) {
+      auto *LI = cast<LoadInst>(Cur);
+      ToProcess.push_back(LI->getPointerOperand());
+      continue;
+    }
+    if (isa<GEPOperator>(Cur)) {
+      auto *GEPOperand = cast<GEPOperator>(Cur);
+      ToProcess.push_back(GEPOperand->getPointerOperand());
+      continue;
+    }
+    if (isa<BitCastOperator>(Cur)) {
+      auto *BC = cast<BitCastOperator>(Cur);
+      ToProcess.push_back(BC->getOperand(0));
+      continue;
+    }
+    if (isa<PHINode>(Cur)) {
+      auto *PN = cast<PHINode>(Cur);
+      for (Value *IV : PN->incoming_values())
+        ToProcess.push_back(IV);
+      continue;
+    }
+    if (isa<SelectInst>(Cur)) {
+      auto *SI = cast<SelectInst>(Cur);
+      ToProcess.push_back(SI->getTrueValue());
+      ToProcess.push_back(SI->getFalseValue());
+      continue;
+    }
+  }
+  return false;
+}
+
 
 // Given an instruction, loads and stores the pointers passed to the
 // instruction. This is useful in the case I is a CallBase, since the function
@@ -1114,8 +1160,10 @@ void EDDI::fixFuncValsPassedByReference(
       if (Duplicate != nullptr) {
         Value *Original = Operand;
         Value *Copy = Duplicate;
+        // do not dereference if operand comes from a device replica slot
         if(Original->getType()->isPointerTy() && Copy->getType()->isPointerTy() &&
-            !DeviceReplicaSlots.count(Copy)) {
+            !deriveFromDeviceReplica(Original, DeviceReplicaSlots) &&
+            !deriveFromDeviceReplica(Copy, DeviceReplicaSlots)) {
           Type *OriginalType = Original->getType();
           Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
           Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
