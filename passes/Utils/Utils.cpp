@@ -35,6 +35,18 @@ static cl::opt<std::string, true> DuplicateSecNameOpt("duplicate-sec", cl::desc(
 bool ProfilingEnabled;
 static cl::opt<bool, true> ProfilingFuncCalls("enable-profiling", cl::desc("Enable the insertion of profiling function calls at synchonization points"), cl::location(ProfilingEnabled), cl::init(false));
 
+bool CudaModeEnabled;
+static cl::opt<bool, true> CudaMode("cuda-mode", cl::desc("Enable CUDA-aware host/device dereferenceability analysis"), cl::location(CudaModeEnabled), cl::init(false));
+
+bool moduleUsesCuda (Module &Md) {
+  static const char *Markers[] = {
+      "__cudaRegisterFatBinary", "__cudaPushCallConfiguration",
+      "cudaLaunchKernel", "cudaMalloc", "cudaMallocManaged", "cudaMemcpy"};
+  for (const char *N : Markers)
+    if (Md.getFunction(N))
+      return true;
+  return false;
+}
 
 bool IsNotAPHINode (Use &U){
   return !isa<PHINode>(U.getUser());

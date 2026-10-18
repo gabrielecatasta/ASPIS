@@ -289,6 +289,7 @@ EOF
                         input_files="$input_files $opt";
                         if [[ "$opt" == *.cu ]]; then
                             cuda_mode=true;
+                            eddi_options="$eddi_options --cuda-mode";
                         fi
                         # Check if it's a .cpp file and if -lstdc++ hasn't been added yet
                         if [[ "$opt" == *.cpp || "$opt" == *.cu ]] && [[ "$libstdcpp_added" == false ]]; then

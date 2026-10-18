@@ -18,6 +18,10 @@ extern bool AlternateMemMapEnabled;
 extern std::string DuplicateSecName;
 extern bool DebugEnabled;
 extern bool ProfilingEnabled;
+extern bool CudaModeEnabled;
+
+// Given a Module MD, it returns true if CUDA is detected
+bool moduleUsesCuda (Module &Md);
 
 // Given a Use U, it returns true if the instruction is a PHI instruction
 bool IsNotAPHINode (Use &U);
