@@ -10,6 +10,8 @@
 #include "ASPIS.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/Statistic.h"
+#include <llvm-21/llvm/ADT/StringRef.h>
+#include <llvm-21/llvm/IR/Argument.h>
 #include <llvm-21/llvm/IR/Instruction.h>
 #include <llvm-21/llvm/IR/Operator.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -25,6 +27,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include <numbers>
 #include <regex>
 #include <array>
 #include <fstream>
@@ -347,6 +350,7 @@ void EDDI::preprocess(Module &Md) {
   // variants of CUSPIS functions
   LLVM_DEBUG(dbgs() << "Storing pointers to duplicate-aware CUSPIS variants...");
   for (Function &F : Md) {
+    // TODO: call the dereferenceability analysis here
     if (!isCuspisFunction(F) || F.arg_size() != 4)
       continue;
     StringRef Name = F.getName();
@@ -1095,8 +1099,166 @@ void EDDI::compareValues(std::vector<Value *> *CmpInstructions, Value &V1, Value
   }
 }
 
+PtrKind EDDI::ptrKindJoin(PtrKind A, PtrKind B) {
+  if (A == B)
+    return A;
+  if (A == PtrKind::Bottom)
+    return B;
+  if (B == PtrKind::Bottom)
+    return A;
+  return PtrKind::Unknown;
+}
+
+bool EDDI::raisePointsTo(Value *V, PtrKind K) {
+  PtrKind Old = PointsTo[V];
+  PtrKind New = ptrKindJoin(Old, K);
+  if (New == Old)
+    return false;
+  PointsTo[V] = New;
+  PointsToWork.push_back(V);
+  return true;
+}
+
+bool EDDI::raiseContains(Value *O, PtrKind K) {
+  PtrKind Old = Contains[O];
+  PtrKind New = ptrKindJoin(Old, K);
+  if (New == Old)
+    return false;
+  Contains[O] = New;
+  ContainsWork.push_back(O);
+  return true;
+}
+
+PtrKind EDDI::classify(Value *V) {
+  auto It = PointsTo.find(V);
+  return It == PointsTo.end() ? PtrKind::Bottom : It->second;
+}
+
+void EDDI::seedSafeDereferenceabilityAnalysis(Function *Fn) {
+  for (auto &BB : *Fn) {
+    for (Argument &A : Fn->args()) {
+      if (!A.getType()->isPointerTy())
+        continue;
+      if (A.hasByValAttr() || A.hasStructRetAttr())
+        raisePointsTo(&A, PtrKind::Host);
+      else
+        raisePointsTo(&A, PtrKind::Unknown);
+    }
+    for (auto &I : BB) {
+      if (isa<AllocaInst>(I))
+        raisePointsTo(&I, PtrKind::Host);
+      if (isa<StoreInst>(I)) {
+        StoreInst *SInstr = cast<StoreInst>(&I);
+        // guard to protect the scenario in which an address gets explicitly stored into the destination
+        // and later gets dereferenced as a pointer (impossible to know whether it is a stack address or device address)
+        if (!SInstr->getValueOperand()->getType()->isPointerTy())
+          raiseContains(getUnderlyingObject(SInstr->getPointerOperand()), PtrKind::Unknown);
+      }
+      else if (isa<CallBase>(I)) {
+        CallBase *CInstr = cast<CallBase>(&I);
+        Function *Callee = CInstr->getCalledFunction();
+        // construct empty string for indirect calls
+        StringRef Cn = Callee ? Callee->getName() : StringRef();
+        if (Cn.contains("cuspisMalloc") || Cn == "cudaMalloc" || Cn == "cudaMallocPitch" || Cn == "cudaMalloc3D")
+          raiseContains(getUnderlyingObject(CInstr->getArgOperand(0)), PtrKind::Device);                        
+        else if (Cn == "cudaMallocManaged" || Cn == "cudaMallocHost" || Cn == "cudaHostAlloc")
+          raiseContains(getUnderlyingObject(CInstr->getArgOperand(0)), PtrKind::Host);      
+        else if (Cn == "malloc" || Cn == "calloc" || Cn == "realloc" || Cn == "strdup")
+          raisePointsTo(CInstr, PtrKind::Host);
+        // TODO: further extend the unmodeled callee branch by analyzing the callee and checking whether 
+        //       the pointer arguments are written through in the body of the function                                                           
+        else {
+          if (CInstr->getType()->isPointerTy()) // pointer returned by unmodeled call
+            raisePointsTo(CInstr, PtrKind::Unknown);
+          // no model for this callee so assume it may store through any pointer arg
+          // also a fallback for indirect call
+          for (auto &Arg : CInstr->args()) {
+            if (!Arg->getType()->isPointerTy() || isa<ConstantData>(Arg))
+              continue;           
+            raiseContains(getUnderlyingObject(Arg), PtrKind::Unknown);             
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+* Given the module, perform a static analysis of the def-use chains for the values in
+* each function, in order to determine if they point to Host, Device, Unknown, or Bottom memory, and
+* if the object in the pointed memory region is a pointer to Host, Device, Unknown or Bottom memory.
+*
+* If the value points to Host memory, it is safe to dereference.
+*
+* Two maps:
+* - PointsTo[V]: where does the SSA value V point?
+* - Contains[O]: if a pointer is loaded from anywhere within the memory object O, 
+*                where might it point?
+*/
+void EDDI::safeDereferenceabilityAnalysis(Module &Md) {
+  for (GlobalVariable &GV : Md.globals()) {
+    raisePointsTo(&GV, PtrKind::Host);
+    if (!GV.hasInitializer()) // written outside this module so it is not possible to know what it contain
+      raiseContains(&GV, PtrKind::Unknown);
+  }
+
+  for (Function &Fn : Md) {
+    if(!Fn.isDeclaration())
+      seedSafeDereferenceabilityAnalysis(&Fn);
+  }
+
+  while (!PointsToWork.empty() || !ContainsWork.empty()) {
+    while (!PointsToWork.empty()) {
+      Value *V = PointsToWork.back();
+      PointsToWork.pop_back();
+      if (!V->hasUseList())
+        continue;
+      PtrKind K = PointsTo[V];
+      for (User *U : V->users()) {
+        // LoadInst and AllocaInst skip goes first so UnaryInstruction test doesn't catch them
+        if (isa<AllocaInst, LoadInst>(*U)) // LoadInst handled in the other loop    
+          continue;
+        if (isa<GEPOperator, UnaryInstruction, PHINode, SelectInst>(*U))
+          raisePointsTo(U, K);
+        else if (isa<StoreInst>(U)) {
+          StoreInst *SInstr = cast<StoreInst>(U);
+          // fire only when V is the value operand
+          if (SInstr->getValueOperand() == V)
+            raiseContains(getUnderlyingObject(SInstr->getPointerOperand()), K);
+        }
+      }
+    }
+    while (!ContainsWork.empty()) {
+      Value *O = ContainsWork.back();
+      ContainsWork.pop_back();
+      PtrKind K = Contains[O];
+      std::unordered_set<Value *> Seen;
+      std::vector<Value *> Addrs{O};
+
+      while (!Addrs.empty()) {
+        Value *A = Addrs.back();
+        Addrs.pop_back();
+        if (!Seen.insert(A).second)
+          continue;
+        if (!A->hasUseList()) 
+          continue;
+        for (User *U : A->users()) {
+          if (isa<GEPOperator, BitCastOperator>(*U))
+            Addrs.push_back(U); // keep following the address arithmetic
+          else if (isa<LoadInst>(U)) {
+            LoadInst *LInstr = cast<LoadInst>(U);
+            if (getUnderlyingObject(LInstr->getPointerOperand()) == O)
+              raisePointsTo(LInstr, K);
+          }
+        }
+      }
+    }
+  }
+}
+
 // Given an Operand, check whether it comes from a pointer that is registered
-// as a device replica slot
+// as a device replica slot, in order to prevent emission of a sync that would otherwise
+// overwrite the base + size stored in the shadow pointer for the CUSPIS overallocated replica.
 bool deriveFromDeviceReplica(Value *V, const std::unordered_set<Value *> &Slots) {
   std::unordered_set<Value *> Visited;
   std::vector<Value *> ToProcess{V};
@@ -1109,37 +1271,16 @@ bool deriveFromDeviceReplica(Value *V, const std::unordered_set<Value *> &Slots)
       continue;
     if (Slots.count(Cur))
       return true;
-    if (isa<LoadInst>(Cur)) {
-      auto *LI = cast<LoadInst>(Cur);
-      ToProcess.push_back(LI->getPointerOperand());
-      continue;
-    }
-    if (isa<GEPOperator>(Cur)) {
-      auto *GEPOperand = cast<GEPOperator>(Cur);
-      ToProcess.push_back(GEPOperand->getPointerOperand());
-      continue;
-    }
-    if (isa<BitCastOperator>(Cur)) {
-      auto *BC = cast<BitCastOperator>(Cur);
-      ToProcess.push_back(BC->getOperand(0));
-      continue;
-    }
-    if (isa<PHINode>(Cur)) {
-      auto *PN = cast<PHINode>(Cur);
-      for (Value *IV : PN->incoming_values())
-        ToProcess.push_back(IV);
-      continue;
-    }
-    if (isa<SelectInst>(Cur)) {
-      auto *SI = cast<SelectInst>(Cur);
-      ToProcess.push_back(SI->getTrueValue());
-      ToProcess.push_back(SI->getFalseValue());
-      continue;
+
+    if (isa<LoadInst, GEPOperator, BitCastOperator, PHINode, SelectInst>(Cur)) {
+      for (Use &U : cast<User>(Cur)->operands()) {
+        if (U->getType()->isPointerTy())
+          ToProcess.push_back(U);
+      }
     }
   }
   return false;
 }
-
 
 // Given an instruction, loads and stores the pointers passed to the
 // instruction. This is useful in the case I is a CallBase, since the function
@@ -1164,13 +1305,16 @@ void EDDI::fixFuncValsPassedByReference(
         if(Original->getType()->isPointerTy() && Copy->getType()->isPointerTy() &&
             !deriveFromDeviceReplica(Original, DeviceReplicaSlots) &&
             !deriveFromDeviceReplica(Copy, DeviceReplicaSlots)) {
-          Type *OriginalType = Original->getType();
-          Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
-          Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
-          DuplicatedInstructionMap.insert(
-              std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
-          DuplicatedInstructionMap.insert(
-              std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+          PtrKind K = classify(Original);
+          if(!CudaMode || K == PtrKind::Host) {
+            Type *OriginalType = Original->getType();
+            Instruction *TmpLoad = B.CreateLoad(OriginalType, Original);
+            Instruction *TmpStore = B.CreateStore(TmpLoad, Copy);
+            DuplicatedInstructionMap.insert(
+                std::pair<Instruction *, Instruction *>(TmpLoad, TmpLoad));
+            DuplicatedInstructionMap.insert(
+                std::pair<Instruction *, Instruction *>(TmpStore, TmpStore));
+          }
         }
       }
     }
@@ -1912,6 +2056,8 @@ int EDDI::rewriteCuspisMemcpyToHost(CallBase *CInstr) {
 PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   LLVM_DEBUG(dbgs() << "Initializing EDDI...\n");
 
+  CudaMode = CudaModeEnabled || moduleUsesCuda(Md);
+
   preprocess(Md);
   LLVM_DEBUG(dbgs() << "[REDDI] Preprocess finished\n");
 
@@ -1971,6 +2117,7 @@ PreservedAnalyses EDDI::run(Module &Md, ModuleAnalysisManager &AM) {
   fixDuplicatedConstructors(Md);
 
   deducedTypes = tda.run(Md, AM);
+  safeDereferenceabilityAnalysis(Md);
 
   // list of duplicated instructions to remove since they are equal to the original
   std::set<CallBase *> GrayAreaCallsToFix;

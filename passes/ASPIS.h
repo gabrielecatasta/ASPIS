@@ -21,6 +21,13 @@ using namespace llvm;
 */
 #define LOG_COMPILED_FUNCS 1
 
+enum class PtrKind {
+  Bottom,
+  Host,
+  Device,
+  Unknown
+};
+
 // DATA PROTECTION
 class FuncRetToRef : public PassInfoMixin<FuncRetToRef> {
     private:
@@ -45,9 +52,13 @@ class EDDI : public PassInfoMixin<EDDI> {
         std::set<Value*> toHardenVariables;
         std::set<Value*> DuplicatedCalls;
         std::unordered_map<std::string, Function *> CuspisDupVariants;
+        std::unordered_map<Value *, PtrKind> PointsTo;
+        std::unordered_map<Value *, PtrKind> Contains;
         std::unordered_multimap<Value *, Value *> DuplicatedInstructionMap;
         std::unordered_set<Instruction *> ClonedInstructions;
         std::unordered_set<Value *> DeviceReplicaSlots;
+        std::vector<Value *> PointsToWork;
+        std::vector<Value *> ContainsWork;
 
         tda::TypeDeductionAnalysis tda;
         tda::TypeDeductionAnalysis::Result deducedTypes;
@@ -58,6 +69,7 @@ class EDDI : public PassInfoMixin<EDDI> {
         bool duplicateAll;
         bool MultipleErrBBEnabled;
         bool CoarseGrainedDuplicationEnabled;
+        bool CudaMode = false;
         int comparisonCounter = 0;
 
         void preprocess(Module &Md);
@@ -70,6 +82,12 @@ class EDDI : public PassInfoMixin<EDDI> {
         bool ptrNotDereferenceable(Value &V);
         void comparePtrs(std::vector<Value *> *CmpInstructions, Value &V1, Value &V2, IRBuilder<> &B);
         void addConsistencyChecks(Instruction &I, BasicBlock &ErrBB);
+        PtrKind ptrKindJoin(PtrKind A, PtrKind B);
+        bool raisePointsTo(Value *V, PtrKind K);
+        bool raiseContains(Value *O, PtrKind K);
+        PtrKind classify(Value *V);
+        void seedSafeDereferenceabilityAnalysis(Function *Fn);
+        void safeDereferenceabilityAnalysis(Module &Md);
         void fixFuncValsPassedByReference(Instruction &I, IRBuilder<> &B);
         int transformCallBaseInst(CallBase *CInstr, IRBuilder<> &B, BasicBlock &ErrBB) ;
         Function *getFunctionDuplicate(Function *Fn);
